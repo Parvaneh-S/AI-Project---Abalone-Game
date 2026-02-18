@@ -16,14 +16,18 @@ class BoardRenderer:
     Handles rendering of the Abalone game board.
     """
 
-    def __init__(self, center_xy: Tuple[int, int]):
+    def __init__(self, center_xy: Tuple[int, int], invert_colors: bool = False, board_layout: str = 'standard'):
         """
         Initialize the board renderer.
 
         Args:
             center_xy: Center coordinates (x, y) for the board
+            invert_colors: If True, swap black and white marble positions
+            board_layout: Board layout type ('standard', 'german', or 'belgian')
         """
         self.center_xy = center_xy
+        self.invert_colors = invert_colors
+        self.board_layout = board_layout
         self.cell_centers = self._compute_cell_centers()
 
     def _compute_cell_centers(self) -> List[List[Tuple[int, int]]]:
@@ -113,22 +117,126 @@ class BoardRenderer:
         """
         colors: Dict[Tuple[int, int], Tuple[int, int, int]] = {}
 
-        # Top whites
-        for c in range(ROW_COUNTS[0]):
-            colors[(0, c)] = WHITE_COLOR
-        for c in range(ROW_COUNTS[1]):
-            colors[(1, c)] = WHITE_COLOR
-        for c in range(2, 5):  # middle whites on row 2
-            colors[(2, c)] = WHITE_COLOR
+        # Determine which color goes on top and which on bottom
+        # When invert_colors is True (player chose WHITE), show BLACK on top and WHITE on bottom
+        # When invert_colors is False (player chose BLACK), show WHITE on top and BLACK on bottom
+        top_color = BLACK_COLOR if self.invert_colors else WHITE_COLOR
+        bottom_color = WHITE_COLOR if self.invert_colors else BLACK_COLOR
 
-        # Bottom blacks
-        last = len(ROW_COUNTS) - 1
-        for c in range(ROW_COUNTS[last]):
-            colors[(last, c)] = BLACK_COLOR
-        for c in range(ROW_COUNTS[last - 1]):
-            colors[(last - 1, c)] = BLACK_COLOR
-        for c in range(2, 5):  # middle blacks on row 6
-            colors[(6, c)] = BLACK_COLOR
+        # Debug output
+        print(f"DEBUG: board_layout={self.board_layout}, invert_colors={self.invert_colors}")
+        print(f"DEBUG: top_color={'BLACK' if top_color == BLACK_COLOR else 'WHITE'}, bottom_color={'BLACK' if bottom_color == BLACK_COLOR else 'WHITE'}")
+
+        if self.board_layout == 'standard':
+            # Standard layout
+            # Top marbles (rows 0, 1, and part of 2)
+            for c in range(ROW_COUNTS[0]):
+                colors[(0, c)] = top_color
+            for c in range(ROW_COUNTS[1]):
+                colors[(1, c)] = top_color
+            for c in range(2, 5):  # middle marbles on row 2
+                colors[(2, c)] = top_color
+
+            # Bottom marbles (rows 8, 7, and part of 6)
+            last = len(ROW_COUNTS) - 1
+            for c in range(ROW_COUNTS[last]):
+                colors[(last, c)] = bottom_color
+            for c in range(ROW_COUNTS[last - 1]):
+                colors[(last - 1, c)] = bottom_color
+            for c in range(2, 5):  # middle marbles on row 6
+                colors[(6, c)] = bottom_color
+
+        elif self.board_layout == 'german':
+            # German Daisy layout - 14 marbles per player
+            # White marbles (14 total) - uses top_color
+            # Row 1: positions 0, 1 (2 marbles)
+            colors[(1, 0)] = top_color
+            colors[(1, 1)] = top_color
+            # Row 2: positions 0, 1, 2 (3 marbles)
+            colors[(2, 0)] = top_color
+            colors[(2, 1)] = top_color
+            colors[(2, 2)] = top_color
+            # Row 3: positions 1, 2 (2 marbles)
+            colors[(3, 1)] = top_color
+            colors[(3, 2)] = top_color
+            # Row 5: positions 5, 6 (2 marbles)
+            colors[(5, 5)] = top_color
+            colors[(5, 6)] = top_color
+            # Row 6: positions 4, 5, 6 (3 marbles)
+            colors[(6, 4)] = top_color
+            colors[(6, 5)] = top_color
+            colors[(6, 6)] = top_color
+            # Row 7: positions 4, 5 (2 marbles) - Total: 14
+            colors[(7, 4)] = top_color
+            colors[(7, 5)] = top_color
+
+            # Black marbles (14 total) - uses bottom_color
+            # Row 1: positions 4, 5 (2 marbles)
+            colors[(1, 4)] = bottom_color
+            colors[(1, 5)] = bottom_color
+            # Row 2: positions 4, 5, 6 (3 marbles)
+            colors[(2, 4)] = bottom_color
+            colors[(2, 5)] = bottom_color
+            colors[(2, 6)] = bottom_color
+            # Row 3: positions 5, 6 (2 marbles)
+            colors[(3, 5)] = bottom_color
+            colors[(3, 6)] = bottom_color
+            # Row 5: positions 1, 2 (2 marbles)
+            colors[(5, 1)] = bottom_color
+            colors[(5, 2)] = bottom_color
+            # Row 6: positions 0, 1, 2 (3 marbles)
+            colors[(6, 0)] = bottom_color
+            colors[(6, 1)] = bottom_color
+            colors[(6, 2)] = bottom_color
+            # Row 7: positions 0, 1 (2 marbles) - Total: 14
+            colors[(7, 0)] = bottom_color
+            colors[(7, 1)] = bottom_color
+
+        elif self.board_layout == 'belgian':
+            # Belgian Daisy layout
+            # Player 1 positions (14 total) - uses top_color
+            # Row 0: positions 0, 1 (2 marbles)
+            colors[(0, 0)] = top_color
+            colors[(0, 1)] = top_color
+            # Row 1: positions 0, 1, 2 (3 marbles)
+            colors[(1, 0)] = top_color
+            colors[(1, 1)] = top_color
+            colors[(1, 2)] = top_color
+            # Row 2: positions 1, 2 (2 marbles)
+            colors[(2, 1)] = top_color
+            colors[(2, 2)] = top_color
+            # Row 6: positions 4, 5 (2 marbles)
+            colors[(6, 4)] = top_color
+            colors[(6, 5)] = top_color
+            # Row 7: positions 3, 4, 5 (3 marbles)
+            colors[(7, 3)] = top_color
+            colors[(7, 4)] = top_color
+            colors[(7, 5)] = top_color
+            # Row 8: positions 3, 4 (2 marbles)
+            colors[(8, 3)] = top_color
+            colors[(8, 4)] = top_color
+
+            # Player 2 positions (14 total) - uses bottom_color
+            # Row 0: positions 3, 4 (2 marbles)
+            colors[(0, 3)] = bottom_color
+            colors[(0, 4)] = bottom_color
+            # Row 1: positions 3, 4, 5 (3 marbles)
+            colors[(1, 3)] = bottom_color
+            colors[(1, 4)] = bottom_color
+            colors[(1, 5)] = bottom_color
+            # Row 2: positions 4, 5 (2 marbles)
+            colors[(2, 4)] = bottom_color
+            colors[(2, 5)] = bottom_color
+            # Row 6: positions 1, 2 (2 marbles)
+            colors[(6, 1)] = bottom_color
+            colors[(6, 2)] = bottom_color
+            # Row 7: positions 0, 1, 2 (3 marbles)
+            colors[(7, 0)] = bottom_color
+            colors[(7, 1)] = bottom_color
+            colors[(7, 2)] = bottom_color
+            # Row 8: positions 0, 1 (2 marbles)
+            colors[(8, 0)] = bottom_color
+            colors[(8, 1)] = bottom_color
 
         return colors
 

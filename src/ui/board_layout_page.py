@@ -351,8 +351,8 @@ class GameModePage:
                     self.back_requested = True
                 # Check if Next button was clicked
                 elif self.next_button_rect.collidepoint(event.pos):
-                    # Only proceed if Standard board and Black circle are selected
-                    if self.selected_board == 'standard' and self.selected_color == 'black':
+                    # Only proceed if a board layout is selected and a color is chosen
+                    if self.selected_board in ['standard', 'german', 'belgian'] and self.selected_color in ['black', 'white']:
                         self.next_requested = True
                 # Check if Standard button was clicked
                 elif self.button_rect.collidepoint(event.pos):

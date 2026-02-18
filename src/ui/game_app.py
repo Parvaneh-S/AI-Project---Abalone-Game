@@ -111,8 +111,15 @@ class GameApp:
                         self.quit()
                         return
 
-                    # Show board scene
-                    board_scene = BoardScene(self.screen, self.clock)
+                    # Show board scene with inverted colors if white was selected
+                    # For Belgian Daisy and German Daisy, color selection doesn't matter - always use black configuration
+                    board_layout = board_layout_page.selected_board if board_layout_page.selected_board else 'standard'
+                    if board_layout == 'standard':
+                        invert_colors = board_layout_page.selected_color == 'white'
+                    else:
+                        # For Belgian Daisy and German Daisy, always use black configuration
+                        invert_colors = False
+                    board_scene = BoardScene(self.screen, self.clock, invert_colors=invert_colors, board_layout=board_layout)
                     board_scene.run()
 
                     # Check if user wants to go back

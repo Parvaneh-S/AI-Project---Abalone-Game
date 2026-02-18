@@ -11,17 +11,21 @@ class BoardScene:
     Main game board scene.
     """
 
-    def __init__(self, screen: pygame.Surface, clock: pygame.time.Clock):
+    def __init__(self, screen: pygame.Surface, clock: pygame.time.Clock, invert_colors: bool = False, board_layout: str = 'standard'):
         """
         Initialize the board scene.
 
         Args:
             screen: Pygame surface to draw on
             clock: Pygame clock for timing
+            invert_colors: If True, swap black and white marble positions
+            board_layout: Board layout type ('standard', 'german', or 'belgian')
         """
         self.screen = screen
         self.clock = clock
-        self.board_renderer = BoardRenderer(BOARD_CENTER)
+        self.invert_colors = invert_colors
+        self.board_layout = board_layout
+        self.board_renderer = BoardRenderer(BOARD_CENTER, invert_colors=invert_colors, board_layout=board_layout)
         self.running = True
         self.go_back = False
         self._setup_back_button()
@@ -55,7 +59,7 @@ class BoardScene:
 
         # Update board center position
         new_board_center = (window_w // 2, window_h // 2)
-        self.board_renderer = BoardRenderer(new_board_center)
+        self.board_renderer = BoardRenderer(new_board_center, invert_colors=self.invert_colors, board_layout=self.board_layout)
 
         # Back button stays in top-left corner, no need to update
 
