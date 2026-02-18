@@ -9,7 +9,6 @@ from src.ui.game_mode_page import GameModePage
 from src.ui.board_layout_page import GameModePage as BoardLayoutPage
 from src.ui.board_scene import BoardScene
 
-
 class GameApp:
     """
     Main game application that manages scenes and window.

@@ -43,6 +43,7 @@ class BoardScene:
         self.game_started = False  # Game needs START button to begin
         self.initial_marble_positions = None  # Store initial board state for reset
         self.show_pause_modal = False  # Whether to show pause modal
+        self.show_stop_modal = False  # Whether to show stop confirmation modal
 
         # Button tooltip tracking
         self.tooltip_text = None  # Current tooltip text to display
@@ -497,6 +498,14 @@ class BoardScene:
                         return False
                     continue
 
+                # If stop modal is showing, handle modal button clicks
+                if self.show_stop_modal:
+                    self._handle_stop_modal_click(event.pos)
+                    # If yes was clicked in modal, running will be False
+                    if not self.running:
+                        return False
+                    continue
+
                 # Check if back button was clicked
                 if self.back_button_rect.collidepoint(event.pos):
                     self.go_back = True
@@ -599,12 +608,31 @@ class BoardScene:
             print("Game resumed!")
 
     def _stop_game(self) -> None:
-        """Stop the game and go back to menu."""
+        """Show stop confirmation modal."""
+        self.show_stop_modal = True
+        print("Stop confirmation modal shown")
+
+    def _confirm_stop_game(self) -> None:
+        """Actually stop the game and go back to menu."""
         print("Game stopped. Going back to menu...")
         self.game_started = False
         self.game_paused = False
+        self.show_stop_modal = False
         self.go_back = True
         self.running = False
+
+    def _handle_stop_modal_click(self, pos: tuple) -> None:
+        """Handle clicks on stop modal buttons."""
+        geom = self._get_stop_modal_geometry()
+
+        # Check clicks
+        if geom['yes_button'].collidepoint(pos):
+            # User confirmed - stop the game
+            self._confirm_stop_game()
+        elif geom['no_button'].collidepoint(pos):
+            # User cancelled - just close the modal
+            self.show_stop_modal = False
+            print("Stop cancelled")
 
     def _reset_game(self) -> None:
         """Reset the game board to initial state."""
@@ -649,6 +677,39 @@ class BoardScene:
             'modal_height': modal_height,
             'resume_button': pygame.Rect(resume_x, buttons_y, button_width, button_height),
             'quit_button': pygame.Rect(quit_x, buttons_y, button_width, button_height)
+        }
+
+    def _get_stop_modal_geometry(self) -> dict:
+        """Get stop modal dimensions and button positions.
+
+        Returns:
+            Dictionary with modal and button geometry
+        """
+        window_w, window_h = self.screen.get_size()
+
+        # Modal dimensions
+        modal_width = 450
+        modal_height = 250
+        modal_x = (window_w - modal_width) // 2
+        modal_y = (window_h - modal_height) // 2
+
+        # Button dimensions
+        button_width = 150
+        button_height = 50
+        button_spacing = 20
+        buttons_y = modal_y + modal_height - 80
+
+        # Calculate button positions
+        yes_x = modal_x + (modal_width - button_width * 2 - button_spacing) // 2
+        no_x = yes_x + button_width + button_spacing
+
+        return {
+            'modal_x': modal_x,
+            'modal_y': modal_y,
+            'modal_width': modal_width,
+            'modal_height': modal_height,
+            'yes_button': pygame.Rect(yes_x, buttons_y, button_width, button_height),
+            'no_button': pygame.Rect(no_x, buttons_y, button_width, button_height)
         }
 
     def _handle_pause_modal_click(self, pos: tuple) -> None:
@@ -903,6 +964,10 @@ class BoardScene:
         if self.tooltip_text:
             self._draw_tooltip()
 
+        # Draw stop confirmation modal if showing
+        if self.show_stop_modal:
+            self._draw_stop_modal()
+
         pygame.display.flip()
 
     def _draw_tooltip(self) -> None:
@@ -964,8 +1029,8 @@ class BoardScene:
         # Get mouse position for hover effects
         mouse_pos = pygame.mouse.get_pos()
 
-        # Draw Resume button
-        resume_color = (100, 200, 100) if geom['resume_button'].collidepoint(mouse_pos) else (80, 180, 80)
+        # Draw Resume button - sage green to match project theme
+        resume_color = (184, 202, 176) if geom['resume_button'].collidepoint(mouse_pos) else (164, 182, 156)  # Sage green
         pygame.draw.rect(self.screen, resume_color, geom['resume_button'], border_radius=10)
         pygame.draw.rect(self.screen, (255, 255, 255), geom['resume_button'], width=2, border_radius=10)
 
@@ -974,8 +1039,8 @@ class BoardScene:
         resume_text_rect = resume_text.get_rect(center=geom['resume_button'].center)
         self.screen.blit(resume_text, resume_text_rect)
 
-        # Draw Quit button
-        quit_color = (200, 80, 80) if geom['quit_button'].collidepoint(mouse_pos) else (180, 60, 60)
+        # Draw Quit button - muted brown/red to match board colors
+        quit_color = (160, 120, 110) if geom['quit_button'].collidepoint(mouse_pos) else (140, 100, 90)  # Muted brown
         pygame.draw.rect(self.screen, quit_color, geom['quit_button'], border_radius=10)
         pygame.draw.rect(self.screen, (255, 255, 255), geom['quit_button'], width=2, border_radius=10)
 
@@ -984,6 +1049,55 @@ class BoardScene:
         quit_text_rect = quit_text.get_rect(center=geom['quit_button'].center)
         self.screen.blit(quit_text, quit_text_rect)
 
+    def _draw_stop_modal(self) -> None:
+        """Draw stop confirmation modal with Yes and No buttons."""
+        window_w, window_h = self.screen.get_size()
+        geom = self._get_stop_modal_geometry()
+
+        # Semi-transparent overlay
+        overlay = pygame.Surface((window_w, window_h), pygame.SRCALPHA)
+        overlay.fill((0, 0, 0, 150))  # Darker overlay
+        self.screen.blit(overlay, (0, 0))
+
+        # Draw modal background
+        modal_rect = pygame.Rect(geom['modal_x'], geom['modal_y'], geom['modal_width'], geom['modal_height'])
+        pygame.draw.rect(self.screen, (240, 240, 240), modal_rect, border_radius=15)
+        pygame.draw.rect(self.screen, (100, 100, 100), modal_rect, width=3, border_radius=15)
+
+        # Draw "Stop Game" title
+        title_font = pygame.font.Font(None, 56)
+        title_text = title_font.render("Stop Game", True, (50, 50, 50))
+        title_rect = title_text.get_rect(center=(geom['modal_x'] + geom['modal_width'] // 2, geom['modal_y'] + 40))
+        self.screen.blit(title_text, title_rect)
+
+        # Draw confirmation text
+        confirm_font = pygame.font.Font(None, 28)
+        confirm_text = confirm_font.render("Are you sure you want to stop?", True, (50, 50, 50))
+        confirm_rect = confirm_text.get_rect(center=(geom['modal_x'] + geom['modal_width'] // 2, geom['modal_y'] + geom['modal_height'] // 2 - 20))
+        self.screen.blit(confirm_text, confirm_rect)
+
+        # Get mouse position for hover effects
+        mouse_pos = pygame.mouse.get_pos()
+
+        # Draw Yes button - sage green to match project theme
+        yes_color = (184, 202, 176) if geom['yes_button'].collidepoint(mouse_pos) else (164, 182, 156)  # Sage green
+        pygame.draw.rect(self.screen, yes_color, geom['yes_button'], border_radius=10)
+        pygame.draw.rect(self.screen, (255, 255, 255), geom['yes_button'], width=2, border_radius=10)
+
+        yes_font = pygame.font.Font(None, 36)
+        yes_text = yes_font.render("Yes", True, (255, 255, 255))
+        yes_text_rect = yes_text.get_rect(center=geom['yes_button'].center)
+        self.screen.blit(yes_text, yes_text_rect)
+
+        # Draw No button - muted brown/red to match board colors
+        no_color = (160, 120, 110) if geom['no_button'].collidepoint(mouse_pos) else (140, 100, 90)  # Muted brown
+        pygame.draw.rect(self.screen, no_color, geom['no_button'], border_radius=10)
+        pygame.draw.rect(self.screen, (255, 255, 255), geom['no_button'], width=2, border_radius=10)
+
+        no_font = pygame.font.Font(None, 36)
+        no_text = no_font.render("No", True, (255, 255, 255))
+        no_text_rect = no_text.get_rect(center=geom['no_button'].center)
+        self.screen.blit(no_text, no_text_rect)
 
     def _draw_board_and_marbles(self) -> None:
         """Draw the board hexagon and all marbles."""
