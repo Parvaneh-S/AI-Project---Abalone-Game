@@ -74,6 +74,62 @@ class BoardScene:
         self.player_score = 0
         self.opponent_score = 0
 
+        # Timer variables
+        self.total_time = 15 * 60  # 15 minutes in seconds
+        self.move_time_computer = 5  # 5 seconds per move
+        self.move_time_player = 5
+        self.is_game_timer_running = False
+        self.start_ticks = 0
+
+        # Move limit variables (set by game configuration)
+        self.max_moves_per_player = 40  # Default move limit per player
+        self.player_moves_remaining = 40  # Player's remaining moves
+        self.computer_moves_remaining = 40  # Computer's remaining moves
+
+        self._setup_timers()
+
+    def _setup_timers(self) -> None:
+        """Setup timer display elements."""
+        # Font for timer text
+        self.timer_font_large = pygame.font.Font(None, 44)
+        self.timer_font_small = pygame.font.Font(None, 24)
+        self.timer_text_color = (0, 0, 0)
+
+        # Total time box properties
+        self.total_time_box_width = 200
+        self.total_time_box_height = 80
+        self.total_time_box_color = (180, 140, 100)  # Tan/brown color
+
+    def set_move_limit(self, max_moves: int) -> None:
+        """
+        Set the move limit for both players.
+        Called from game configuration before game starts.
+
+        Args:
+            max_moves: Maximum moves per player (e.g., 40)
+        """
+        self.max_moves_per_player = max_moves
+        self.player_moves_remaining = max_moves
+        self.computer_moves_remaining = max_moves
+        print(f"Move limit set to {max_moves} per player")
+
+    def _update_timers(self) -> None:
+        """Update game timers."""
+        if not self.is_game_timer_running:
+            return
+
+        elapsed = (pygame.time.get_ticks() - self.start_ticks) // 1000
+        self.total_time = max(0, 15 * 60 - elapsed)
+
+        # Update move timer for current player
+        move_elapsed = elapsed % 10
+        if move_elapsed < 5:
+            self.move_time_player = max(0, 5 - move_elapsed)
+            self.move_time_computer = 5
+        else:
+            self.move_time_computer = max(0, 10 - move_elapsed)
+            self.move_time_player = 5
+
     def _setup_back_button(self) -> None:
         """Setup the back button in the top-left corner."""
         # Button properties
@@ -553,6 +609,17 @@ class BoardScene:
                         self.marble_positions[drop_cell] = self.marble_positions[self.dragged_marble]
                         del self.marble_positions[self.dragged_marble]
 
+                        # Decrement player's move limit
+                        self.player_moves_remaining -= 1
+                        print(f"Player move made! Remaining moves: {self.player_moves_remaining}")
+
+                        # Check if player reached move limit
+                        if self.player_moves_remaining <= 0:
+                            print("Player has reached move limit!")
+                            self.game_paused = True
+                            self.show_pause_modal = True
+                            # TODO: Show game over message or end game
+
                         # Clear selection after a successful move
                         self.selected_marble = None
 
@@ -585,11 +652,15 @@ class BoardScene:
             # Start the game
             self.game_started = True
             self.game_paused = False
+            self.is_game_timer_running = True
+            self.start_ticks = pygame.time.get_ticks()
             print("Game started!")
         elif self.game_paused:
             # Resume if paused
             self.game_paused = False
             self.show_pause_modal = False
+            self.is_game_timer_running = True
+            self.start_ticks = pygame.time.get_ticks()
             print("Game resumed!")
         else:
             print("Game is already running!")
@@ -600,11 +671,14 @@ class BoardScene:
             # Pausing the game
             self.game_paused = True
             self.show_pause_modal = True
+            self.is_game_timer_running = False
             print("Game paused!")
         else:
             # Resuming the game (called from modal resume button)
             self.game_paused = False
             self.show_pause_modal = False
+            self.is_game_timer_running = True
+            self.start_ticks = pygame.time.get_ticks()
             print("Game resumed!")
 
     def _stop_game(self) -> None:
@@ -618,6 +692,7 @@ class BoardScene:
         self.game_started = False
         self.game_paused = False
         self.show_stop_modal = False
+        self.is_game_timer_running = False
         self.go_back = True
         self.running = False
 
@@ -644,6 +719,10 @@ class BoardScene:
             self.is_human_turn = True
             self.game_paused = False
             self.show_pause_modal = False
+            self.is_game_timer_running = False
+            self.total_time = 15 * 60
+            self.move_time_computer = 5
+            self.move_time_player = 5
             print("Game reset to initial state!")
 
     def _get_pause_modal_geometry(self) -> dict:
@@ -911,6 +990,9 @@ class BoardScene:
         # Draw the score displays above and below the board
         self._draw_opponent_score_display()  # Above board
         self._draw_player_score_display()    # Below board
+
+        # Draw timers
+        self._draw_timers()
 
         # Draw the gray sidebar on the right
         pygame.draw.rect(self.screen, self.sidebar_color, self.sidebar_rect)
@@ -1408,10 +1490,89 @@ class BoardScene:
         ]
         pygame.draw.polygon(self.screen, self.button_icon_color, arrow_points)
 
+    def _draw_timers(self) -> None:
+        """Draw timer boxes and player indicators around the board."""
+        window_w, window_h = self.screen.get_size()
+        available_width = window_w - self.sidebar_width
+        board_center_x = available_width // 2
+
+        # Responsive sizing based on window dimensions
+        # Scale boxes based on available width
+        scale_factor = max(0.7, min(available_width / 1200, 1.2))  # Scale between 0.7x and 1.2x
+
+        total_box_width = int(200 * scale_factor)
+        total_box_height = int(70 * scale_factor)
+        timer_box_width = int(120 * scale_factor)
+        timer_box_height = int(60 * scale_factor)
+
+        # Responsive padding
+        top_padding = int(30 * scale_factor)
+        bottom_padding = int(120 * scale_factor)
+        right_offset = int(200 * scale_factor)  # Increased from 80 to move timers more right
+
+        # Draw Total Game Time box at TOP CENTER
+        total_box_x = board_center_x - (total_box_width // 2)
+        total_box_y = top_padding
+        total_box_rect = pygame.Rect(total_box_x, total_box_y, total_box_width, total_box_height)
+        pygame.draw.rect(self.screen, self.total_time_box_color, total_box_rect, border_radius=10)
+        pygame.draw.rect(self.screen, (0, 0, 0), total_box_rect, width=2, border_radius=10)
+
+        # Draw total time text with responsive font
+        label_font = pygame.font.Font(None, int(20 * scale_factor))
+        total_label = label_font.render("Total Game Time:", True, self.timer_text_color)
+        total_label_rect = total_label.get_rect(topleft=(total_box_x + int(10 * scale_factor), total_box_y + int(5 * scale_factor)))
+        self.screen.blit(total_label, total_label_rect)
+
+        # Draw total time value
+        value_font = pygame.font.Font(None, int(38 * scale_factor))
+        minutes = self.total_time // 60
+        seconds = self.total_time % 60
+        total_value = value_font.render(f"{minutes}:{seconds:02d}", True, self.timer_text_color)
+        total_value_rect = total_value.get_rect(topleft=(total_box_x + int(20 * scale_factor), total_box_y + int(35 * scale_factor)))
+        self.screen.blit(total_value, total_value_rect)
+
+        # Draw first 5 sec timer on TOP RIGHT (under total time)
+        timer1_box_x = board_center_x + right_offset
+        timer1_box_y = total_box_y + total_box_height + int(20 * scale_factor)
+        timer1_box_rect = pygame.Rect(timer1_box_x, timer1_box_y, timer_box_width, timer_box_height)
+        pygame.draw.rect(self.screen, (200, 150, 100), timer1_box_rect, border_radius=8)
+        pygame.draw.rect(self.screen, (0, 0, 0), timer1_box_rect, width=2, border_radius=8)
+
+        # Draw only the timer value (5 sec) centered in box
+        timer1_value = value_font.render(f"{self.move_time_computer}s", True, self.timer_text_color)
+        timer1_value_rect = timer1_value.get_rect(center=timer1_box_rect.center)
+        self.screen.blit(timer1_value, timer1_value_rect)
+
+        # Draw second 5 sec timer on BOTTOM RIGHT (facing top-right timer)
+        timer2_box_x = board_center_x + right_offset
+        timer2_box_y = window_h - bottom_padding
+        timer2_box_rect = pygame.Rect(timer2_box_x, timer2_box_y, timer_box_width, timer_box_height)
+        pygame.draw.rect(self.screen, (150, 180, 220), timer2_box_rect, border_radius=8)
+        pygame.draw.rect(self.screen, (0, 0, 0), timer2_box_rect, width=2, border_radius=8)
+
+        # Draw only the timer value (5 sec) centered in box
+        timer2_value = value_font.render(f"{self.move_time_player}s", True, self.timer_text_color)
+        timer2_value_rect = timer2_value.get_rect(center=timer2_box_rect.center)
+        self.screen.blit(timer2_value, timer2_value_rect)
+
+        # Draw move limit displays below the timer boxes
+        move_limit_font = pygame.font.Font(None, int(26 * scale_factor))
+
+        # Computer move limit (below top-right timer)
+        computer_move_text = move_limit_font.render(f"Moves: {self.computer_moves_remaining}/{self.max_moves_per_player}", True, self.timer_text_color)
+        computer_move_rect = computer_move_text.get_rect(topleft=(timer1_box_x - int(15 * scale_factor), timer1_box_y + timer_box_height + int(8 * scale_factor)))
+        self.screen.blit(computer_move_text, computer_move_rect)
+
+        # Player move limit (below bottom-right timer)
+        player_move_text = move_limit_font.render(f"Moves: {self.player_moves_remaining}/{self.max_moves_per_player}", True, self.timer_text_color)
+        player_move_rect = player_move_text.get_rect(topleft=(timer2_box_x - int(15 * scale_factor), timer2_box_y - move_limit_font.get_height() - int(8 * scale_factor)))
+        self.screen.blit(player_move_text, player_move_rect)
+
     def run(self) -> None:
         """Run the board scene game loop."""
         while self.running:
             self.running = self._handle_events()
+            self._update_timers()
             self._draw()
             self.clock.tick(FPS)
 
