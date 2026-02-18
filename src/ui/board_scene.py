@@ -47,6 +47,9 @@ class BoardScene:
         # Button tooltip tracking
         self.tooltip_text = None  # Current tooltip text to display
         self.tooltip_position = (0, 0)  # Tooltip position
+        # Selection state - persistent selection that shows valid moves
+        self.selected_marble = None  # (row, col) of the currently selected marble
+
 
         self._setup_back_button()
         self._setup_sidebar()
@@ -517,6 +520,9 @@ class BoardScene:
                 if self.is_human_turn and self.game_started and not self.game_paused:
                     marble_at_pos = self._get_marble_at_position(event.pos)
                     if marble_at_pos and self.marble_positions.get(marble_at_pos) == self.player_color:
+                        # Select this marble (or reselect if already selected)
+                        self.selected_marble = marble_at_pos
+                        # Start dragging
                         self.dragging = True
                         self.dragged_marble = marble_at_pos
                         marble_center = self._get_marble_screen_position(marble_at_pos)
@@ -538,7 +544,10 @@ class BoardScene:
                         self.marble_positions[drop_cell] = self.marble_positions[self.dragged_marble]
                         del self.marble_positions[self.dragged_marble]
 
-                    # Reset dragging state
+                        # Clear selection after a successful move
+                        self.selected_marble = None
+
+                    # Reset dragging state (but keep selection if move wasn't made)
                     self.dragging = False
                     self.dragged_marble = None
                     self.drag_offset = (0, 0)
@@ -807,6 +816,7 @@ class BoardScene:
 
         return False
 
+
     def _get_valid_destinations(self, marble: tuple) -> list:
         """
         Get all valid destination cells for a given marble.
@@ -989,10 +999,11 @@ class BoardScene:
         pygame.draw.polygon(self.screen, BORDER_COLOR, outer_hex)
         pygame.draw.polygon(self.screen, BOARD_FILL, inner_hex)
 
-        # Get valid destinations if a marble is being dragged
+        # Get valid destinations for selected or dragged marble
         valid_destinations = []
-        if self.dragging and self.dragged_marble:
-            valid_destinations = self._get_valid_destinations(self.dragged_marble)
+        marble_to_show_moves = self.dragged_marble if self.dragging else self.selected_marble
+        if marble_to_show_moves:
+            valid_destinations = self._get_valid_destinations(marble_to_show_moves)
 
         # Draw all cells and marbles
         for row, row_cells in enumerate(self.board_renderer.cell_centers):
@@ -1011,6 +1022,11 @@ class BoardScene:
                     color = self.marble_positions.get(cell, EMPTY_COLOR)
                     pygame.draw.circle(self.screen, (120, 120, 120), (x, y), CELL_RADIUS + 1)
                     pygame.draw.circle(self.screen, color, (x, y), CELL_RADIUS)
+
+                    # If this marble is selected (but not being dragged), highlight it
+                    if self.selected_marble == cell and not self.dragging:
+                        pygame.draw.circle(self.screen, (255, 215, 0), (x, y), CELL_RADIUS + 4, 3)  # Gold ring
+
 
                     # If this is a valid destination, draw a small white solid ball inside
                     if cell in valid_destinations:
