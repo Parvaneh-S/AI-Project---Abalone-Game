@@ -29,8 +29,8 @@ ROW_COUNTS = [5, 6, 7, 8, 9, 8, 7, 6, 5]
 # ----------------------------
 # Cell geometry
 # ----------------------------
-CELL_RADIUS = 16  # Reduced from 22 to make board smaller
-CELL_GAP = 7      # Proportionally reduced from 10
+CELL_RADIUS = 20  # Increased for bigger board
+CELL_GAP = 9      # Proportionally increased
 
 DX = 2 * CELL_RADIUS + CELL_GAP
 DY = int((math.sqrt(3) / 2) * DX)
@@ -40,8 +40,8 @@ BOARD_CENTER = (WINDOW_W // 2, WINDOW_H // 2)  # Perfectly centered
 # ----------------------------
 # Rim / padding controls
 # ----------------------------
-RIM_WIDTH = 30        # Proportionally reduced from 42
-CELL_MARGIN = 6       # Proportionally reduced from 8
+RIM_WIDTH = 38        # Proportionally increased for bigger board
+CELL_MARGIN = 8       # Proportionally increased
 
 # ----------------------------
 # Landing Page
