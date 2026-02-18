@@ -2,6 +2,7 @@
 Board scene for the Abalone game.
 """
 import pygame
+from typing import Optional
 from src.constants import FPS, BG_COLOR, CELL_RADIUS, BLACK_COLOR, WHITE_COLOR
 from src.ui.board_renderer import BoardRenderer
 
@@ -37,6 +38,15 @@ class BoardScene:
         self.drag_offset = (0, 0)  # Offset from marble center to mouse position
         self.player_color = BLACK_COLOR if not invert_colors else WHITE_COLOR  # Player's chosen color
 
+        # Game state management
+        self.game_paused = False  # Whether the game is currently paused
+        self.game_started = False  # Game needs START button to begin
+        self.initial_marble_positions = None  # Store initial board state for reset
+        self.show_pause_modal = False  # Whether to show pause modal
+
+        # Button tooltip tracking
+        self.tooltip_text = None  # Current tooltip text to display
+        self.tooltip_position = (0, 0)  # Tooltip position
         # Selection state - persistent selection that shows valid moves
         self.selected_marble = None  # (row, col) of the currently selected marble
 
@@ -54,6 +64,7 @@ class BoardScene:
 
         # Initialize marble positions from board renderer
         self.marble_positions = self.board_renderer._get_example_marbles().copy()
+        self.initial_marble_positions = self.marble_positions.copy()  # Save initial state
 
         # Move history tracking
         self.move_history = []  # List of tuples: (move_notation, marble_color)
@@ -61,6 +72,44 @@ class BoardScene:
         # Score tracking
         self.player_score = 0
         self.opponent_score = 0
+
+        # Timer variables
+        self.total_time = 15 * 60  # 15 minutes in seconds
+        self.move_time_computer = 5  # 5 seconds per move
+        self.move_time_player = 5
+        self.is_game_timer_running = False
+        self.start_ticks = 0
+
+        self._setup_timers()
+
+    def _setup_timers(self) -> None:
+        """Setup timer display elements."""
+        # Font for timer text
+        self.timer_font_large = pygame.font.Font(None, 44)
+        self.timer_font_small = pygame.font.Font(None, 24)
+        self.timer_text_color = (0, 0, 0)
+
+        # Total time box properties
+        self.total_time_box_width = 200
+        self.total_time_box_height = 80
+        self.total_time_box_color = (180, 140, 100)  # Tan/brown color
+
+    def _update_timers(self) -> None:
+        """Update game timers."""
+        if not self.is_game_timer_running:
+            return
+
+        elapsed = (pygame.time.get_ticks() - self.start_ticks) // 1000
+        self.total_time = max(0, 15 * 60 - elapsed)
+
+        # Update move timer for current player
+        move_elapsed = elapsed % 10
+        if move_elapsed < 5:
+            self.move_time_player = max(0, 5 - move_elapsed)
+            self.move_time_computer = 5
+        else:
+            self.move_time_computer = max(0, 10 - move_elapsed)
+            self.move_time_player = 5
 
     def _setup_back_button(self) -> None:
         """Setup the back button in the top-left corner."""
@@ -223,9 +272,6 @@ class BoardScene:
         # Position will be calculated dynamically in draw methods
         # based on the actual board hexagon edges
 
-    def toggle_turn(self) -> None:
-        """Toggle between human and computer turns."""
-        self.is_human_turn = not self.is_human_turn
 
     def _cell_to_notation(self, cell: tuple) -> str:
         """
@@ -254,6 +300,39 @@ class BoardScene:
         col_number = col + 1
 
         return f"{row_label}{col_number}"
+
+    @staticmethod
+    def _notation_to_cell(notation: str) -> Optional[tuple[int, int]]:
+        """
+        Convert cell notation to (row, col) coordinates.
+        Reverse operation of _cell_to_notation.
+
+        Args:
+            notation: Cell notation string (e.g., 'I1', 'E5', 'A1')
+
+        Returns:
+            Tuple (row, col) or None if notation is invalid
+        """
+        if len(notation) != 2:
+            return None
+
+        row_label = notation[0]
+        col_str = notation[1]
+
+        try:
+            # Convert row label back to row number (I=0, H=1, ..., A=8)
+            row = ord('I') - ord(row_label)
+
+            # Convert column string to column number (1-indexed to 0-indexed)
+            col = int(col_str) - 1
+
+            # Validate ranges
+            if row < 0 or row > 8 or col < 0 or col > 8:
+                return None
+
+            return (row, col)
+        except (ValueError, TypeError):
+            return None
 
     def _setup_control_buttons(self) -> None:
         """Setup the control buttons (start, pause, stop, reset) in the bottom box."""
@@ -406,22 +485,38 @@ class BoardScene:
         """
         mouse_pos = pygame.mouse.get_pos()
 
-        # Update back button hover state
+        # Reset tooltip
+        self.tooltip_text = None
+        self.tooltip_position = mouse_pos
+
+        # Update back button hover state and tooltip
         if self.back_button_rect.collidepoint(mouse_pos):
             self.current_back_button_color = self.back_button_hover_color
+            self.tooltip_text = "Back"
         else:
             self.current_back_button_color = self.back_button_color
 
-        # Update control buttons hover state
+        # Update control buttons hover state and tooltips
         for button in self.control_buttons:
             if button['rect'].collidepoint(mouse_pos):
                 button['hover'] = True
+                # Set tooltip based on button type
+                if button['type'] == 'start':
+                    self.tooltip_text = "Start"
+                elif button['type'] == 'pause':
+                    self.tooltip_text = "Pause"
+                elif button['type'] == 'stop':
+                    self.tooltip_text = "Stop"
+                elif button['type'] == 'reset':
+                    self.tooltip_text = "Reset"
             else:
                 button['hover'] = False
 
-        # Update undo button hover state
+        # Update undo button hover state and tooltip
         if self.undo_button_rect.collidepoint(mouse_pos):
             self.undo_button_hover = True
+            if not self.tooltip_text:  # Only set if not already set by control button
+                self.tooltip_text = "Undo"
         else:
             self.undo_button_hover = False
 
@@ -432,6 +527,14 @@ class BoardScene:
                 # Window was resized, update positions
                 self._update_positions()
             if event.type == pygame.MOUSEBUTTONDOWN:
+                # If pause modal is showing, handle modal button clicks
+                if self.show_pause_modal:
+                    self._handle_pause_modal_click(event.pos)
+                    # If quit was clicked in modal, running will be False
+                    if not self.running:
+                        return False
+                    continue
+
                 # Check if back button was clicked
                 if self.back_button_rect.collidepoint(event.pos):
                     self.go_back = True
@@ -441,6 +544,9 @@ class BoardScene:
                 for button in self.control_buttons:
                     if button['rect'].collidepoint(event.pos):
                         self._handle_control_button_click(button['type'])
+                        # If stop was clicked, running will be False, so return False
+                        if not self.running:
+                            return False
                         continue
 
                 # Check if undo button was clicked
@@ -448,8 +554,8 @@ class BoardScene:
                     self._handle_undo_button_click()
                     continue
 
-                # Check if a marble was clicked for selection or dragging
-                if self.is_human_turn:
+                # Check if a marble was clicked for dragging (only if game is started and not paused)
+                if self.is_human_turn and self.game_started and not self.game_paused:
                     marble_at_pos = self._get_marble_at_position(event.pos)
                     if marble_at_pos and self.marble_positions.get(marble_at_pos) == self.player_color:
                         # Select this marble (or reselect if already selected)
@@ -494,24 +600,160 @@ class BoardScene:
             button_type: Type of button clicked ('start', 'pause', 'stop', 'reset')
         """
         if button_type == 'start':
-            print("Start button clicked")
-            # TODO: Implement start game logic
+            self._start_game()
         elif button_type == 'pause':
-            print("Pause button clicked")
-            # TODO: Implement pause game logic
+            self._pause_game()
         elif button_type == 'stop':
-            print("Stop button clicked")
-            # TODO: Implement stop game logic
+            self._stop_game()
         elif button_type == 'reset':
-            print("Reset button clicked")
-            # TODO: Implement reset game logic
+            self._reset_game()
+
+    def _start_game(self) -> None:
+        """Start or resume the game."""
+        if not self.game_started:
+            # Start the game
+            self.game_started = True
+            self.game_paused = False
+            self.is_game_timer_running = True
+            self.start_ticks = pygame.time.get_ticks()
+            print("Game started!")
+        elif self.game_paused:
+            # Resume if paused
+            self.game_paused = False
+            self.show_pause_modal = False
+            self.is_game_timer_running = True
+            self.start_ticks = pygame.time.get_ticks()
+            print("Game resumed!")
+        else:
+            print("Game is already running!")
+
+    def _pause_game(self) -> None:
+        """Pause or resume the game."""
+        if not self.game_paused:
+            # Pausing the game
+            self.game_paused = True
+            self.show_pause_modal = True
+            self.is_game_timer_running = False
+            print("Game paused!")
+        else:
+            # Resuming the game (called from modal resume button)
+            self.game_paused = False
+            self.show_pause_modal = False
+            self.is_game_timer_running = True
+            self.start_ticks = pygame.time.get_ticks()
+            print("Game resumed!")
+
+    def _stop_game(self) -> None:
+        """Stop the game and go back to menu."""
+        print("Game stopped. Going back to menu...")
+        self.game_started = False
+        self.game_paused = False
+        self.is_game_timer_running = False
+        self.go_back = True
+        self.running = False
+
+    def _reset_game(self) -> None:
+        """Reset the game board to initial state."""
+        if self.initial_marble_positions:
+            self.marble_positions = self.initial_marble_positions.copy()
+            self.move_history = []
+            self.player_score = 0
+            self.opponent_score = 0
+            self.is_human_turn = True
+            self.game_paused = False
+            self.show_pause_modal = False
+            self.is_game_timer_running = False
+            self.total_time = 15 * 60
+            self.move_time_computer = 5
+            self.move_time_player = 5
+            print("Game reset to initial state!")
+
+    def _get_pause_modal_geometry(self) -> dict:
+        """Get pause modal dimensions and button positions.
+
+        Returns:
+            Dictionary with modal and button geometry
+        """
+        window_w, window_h = self.screen.get_size()
+
+        # Modal dimensions
+        modal_width = 400
+        modal_height = 250
+        modal_x = (window_w - modal_width) // 2
+        modal_y = (window_h - modal_height) // 2
+
+        # Button dimensions
+        button_width = 150
+        button_height = 50
+        button_spacing = 20
+        buttons_y = modal_y + modal_height - 80
+
+        # Calculate button positions
+        resume_x = modal_x + (modal_width - button_width * 2 - button_spacing) // 2
+        quit_x = resume_x + button_width + button_spacing
+
+        return {
+            'modal_x': modal_x,
+            'modal_y': modal_y,
+            'modal_width': modal_width,
+            'modal_height': modal_height,
+            'resume_button': pygame.Rect(resume_x, buttons_y, button_width, button_height),
+            'quit_button': pygame.Rect(quit_x, buttons_y, button_width, button_height)
+        }
+
+    def _handle_pause_modal_click(self, pos: tuple) -> None:
+        """Handle clicks on pause modal buttons."""
+        geom = self._get_pause_modal_geometry()
+
+        # Check clicks
+        if geom['resume_button'].collidepoint(pos):
+            # Resume game
+            self.game_paused = False
+            self.show_pause_modal = False
+            print("Game resumed!")
+        elif geom['quit_button'].collidepoint(pos):
+            # Quit to menu
+            print("Quitting to menu...")
+            self.go_back = True
+            self.running = False
 
     def _handle_undo_button_click(self) -> None:
-        """Handle undo button click."""
-        print("Undo button clicked")
-        # TODO: Implement undo last move logic
+        """Handle undo button click - undo the last move."""
+        if not self.move_history:
+            print("No moves to undo!")
+            return
 
-    def _get_marble_at_position(self, pos: tuple) -> tuple:
+        if self.game_paused:
+            print("Cannot undo while game is paused. Resume first.")
+            return
+
+        # Get the last move from history
+        last_move_notation, marble_color = self.move_history.pop()
+
+        # Parse the move notation to get from and to positions
+        # Format: e.g., "I1I2" (from I1 to I2)
+        from_notation = last_move_notation[:2]  # e.g., "I1"
+        to_notation = last_move_notation[2:]    # e.g., "I2"
+
+        # Convert notation back to (row, col)
+        from_cell = self._notation_to_cell(from_notation)
+        to_cell = self._notation_to_cell(to_notation)
+
+        if from_cell is None or to_cell is None:
+            print("Error: Could not parse move notation")
+            self.move_history.append((last_move_notation, marble_color))
+            return
+
+        # Move the marble back from to_cell to from_cell
+        if to_cell in self.marble_positions:
+            self.marble_positions[from_cell] = self.marble_positions[to_cell]
+            del self.marble_positions[to_cell]
+            print(f"Undo successful! Reversed move: {last_move_notation}")
+        else:
+            print("Error: Could not undo move - target cell not found")
+            self.move_history.append((last_move_notation, marble_color))
+
+    def _get_marble_at_position(self, pos: tuple[int, int]) -> Optional[tuple[int, int]]:
         """
         Get the marble (row, col) at the given screen position.
 
@@ -528,7 +770,7 @@ class BoardScene:
                 return (row, col)
         return None
 
-    def _get_cell_at_position(self, pos: tuple) -> tuple:
+    def _get_cell_at_position(self, pos: tuple[int, int]) -> Optional[tuple[int, int]]:
         """
         Get the cell (row, col) at the given screen position.
 
@@ -545,7 +787,7 @@ class BoardScene:
                     return (row, col)
         return None
 
-    def _get_marble_screen_position(self, marble: tuple) -> tuple:
+    def _get_marble_screen_position(self, marble: tuple[int, int]) -> tuple[int, int]:
         """
         Get the screen position (x, y) for a given marble (row, col).
 
@@ -659,6 +901,9 @@ class BoardScene:
         self._draw_opponent_score_display()  # Above board
         self._draw_player_score_display()    # Below board
 
+        # Draw timers
+        self._draw_timers()
+
         # Draw the gray sidebar on the right
         pygame.draw.rect(self.screen, self.sidebar_color, self.sidebar_rect)
 
@@ -703,7 +948,95 @@ class BoardScene:
                 # Draw marble
                 pygame.draw.circle(self.screen, color, (drag_x, drag_y), CELL_RADIUS)
 
+        # Draw pause modal if showing
+        if self.show_pause_modal:
+            self._draw_pause_modal()
+
+        # Draw tooltip if exists
+        if self.tooltip_text:
+            self._draw_tooltip()
+
         pygame.display.flip()
+
+    def _draw_tooltip(self) -> None:
+        """Draw tooltip at mouse position."""
+        if not self.tooltip_text:
+            return
+
+        # Create tooltip
+        font = pygame.font.Font(None, 24)
+        text_surface = font.render(self.tooltip_text, True, (255, 255, 255))
+
+        # Tooltip background
+        padding = 8
+        tooltip_width = text_surface.get_width() + padding * 2
+        tooltip_height = text_surface.get_height() + padding * 2
+
+        # Position tooltip above and to the right of cursor
+        tooltip_x = self.tooltip_position[0] + 15
+        tooltip_y = self.tooltip_position[1] - tooltip_height - 10
+
+        # Keep tooltip on screen
+        window_w, window_h = self.screen.get_size()
+        if tooltip_x + tooltip_width > window_w:
+            tooltip_x = self.tooltip_position[0] - tooltip_width - 15
+        if tooltip_y < 0:
+            tooltip_y = self.tooltip_position[1] + 20
+
+        # Draw tooltip background (dark with border)
+        tooltip_rect = pygame.Rect(tooltip_x, tooltip_y, tooltip_width, tooltip_height)
+        pygame.draw.rect(self.screen, (50, 50, 50), tooltip_rect, border_radius=5)
+        pygame.draw.rect(self.screen, (200, 200, 200), tooltip_rect, width=1, border_radius=5)
+
+        # Draw text
+        text_x = tooltip_x + padding
+        text_y = tooltip_y + padding
+        self.screen.blit(text_surface, (text_x, text_y))
+
+    def _draw_pause_modal(self) -> None:
+        """Draw pause modal with Resume and Quit buttons."""
+        window_w, window_h = self.screen.get_size()
+        geom = self._get_pause_modal_geometry()
+
+        # Semi-transparent overlay
+        overlay = pygame.Surface((window_w, window_h), pygame.SRCALPHA)
+        overlay.fill((0, 0, 0, 150))  # Darker overlay
+        self.screen.blit(overlay, (0, 0))
+
+        # Draw modal background
+        modal_rect = pygame.Rect(geom['modal_x'], geom['modal_y'], geom['modal_width'], geom['modal_height'])
+        pygame.draw.rect(self.screen, (240, 240, 240), modal_rect, border_radius=15)
+        pygame.draw.rect(self.screen, (100, 100, 100), modal_rect, width=3, border_radius=15)
+
+        # Draw "Game Paused" title
+        title_font = pygame.font.Font(None, 56)
+        title_text = title_font.render("Game Paused", True, (50, 50, 50))
+        title_rect = title_text.get_rect(center=(geom['modal_x'] + geom['modal_width'] // 2, geom['modal_y'] + 60))
+        self.screen.blit(title_text, title_rect)
+
+        # Get mouse position for hover effects
+        mouse_pos = pygame.mouse.get_pos()
+
+        # Draw Resume button
+        resume_color = (100, 200, 100) if geom['resume_button'].collidepoint(mouse_pos) else (80, 180, 80)
+        pygame.draw.rect(self.screen, resume_color, geom['resume_button'], border_radius=10)
+        pygame.draw.rect(self.screen, (255, 255, 255), geom['resume_button'], width=2, border_radius=10)
+
+        resume_font = pygame.font.Font(None, 36)
+        resume_text = resume_font.render("Resume", True, (255, 255, 255))
+        resume_text_rect = resume_text.get_rect(center=geom['resume_button'].center)
+        self.screen.blit(resume_text, resume_text_rect)
+
+        # Draw Quit button
+        quit_color = (200, 80, 80) if geom['quit_button'].collidepoint(mouse_pos) else (180, 60, 60)
+        pygame.draw.rect(self.screen, quit_color, geom['quit_button'], border_radius=10)
+        pygame.draw.rect(self.screen, (255, 255, 255), geom['quit_button'], width=2, border_radius=10)
+
+        quit_font = pygame.font.Font(None, 36)
+        quit_text = quit_font.render("Quit", True, (255, 255, 255))
+        quit_text_rect = quit_text.get_rect(center=geom['quit_button'].center)
+        self.screen.blit(quit_text, quit_text_rect)
+
 
     def _draw_board_and_marbles(self) -> None:
         """Draw the board hexagon and all marbles."""
@@ -1014,10 +1347,65 @@ class BoardScene:
         ]
         pygame.draw.polygon(self.screen, self.button_icon_color, arrow_points)
 
+    def _draw_timers(self) -> None:
+        """Draw timer boxes and player indicators around the board."""
+        window_w, window_h = self.screen.get_size()
+        available_width = window_w - self.sidebar_width
+        board_center_x = available_width // 2
+
+        # Draw Total Game Time box at TOP CENTER
+        total_box_width = 220
+        total_box_height = 80
+        total_box_x = board_center_x - (total_box_width // 2)
+        total_box_y = 40
+        total_box_rect = pygame.Rect(total_box_x, total_box_y, total_box_width, total_box_height)
+        pygame.draw.rect(self.screen, self.total_time_box_color, total_box_rect, border_radius=10)
+        pygame.draw.rect(self.screen, (0, 0, 0), total_box_rect, width=2, border_radius=10)
+
+        # Draw total time text
+        total_label = self.timer_font_small.render("Total Game Time:", True, self.timer_text_color)
+        total_label_rect = total_label.get_rect(topleft=(total_box_x + 15, total_box_y + 8))
+        self.screen.blit(total_label, total_label_rect)
+
+        minutes = self.total_time // 60
+        seconds = self.total_time % 60
+        total_value = self.timer_font_large.render(f"{minutes}:{seconds:02d}", True, self.timer_text_color)
+        total_value_rect = total_value.get_rect(topleft=(total_box_x + 25, total_box_y + 38))
+        self.screen.blit(total_value, total_value_rect)
+
+        # Draw first 5 sec timer on TOP RIGHT (under total time)
+        timer1_box_width = 140
+        timer1_box_height = 70
+        timer1_box_x = board_center_x + 120
+        timer1_box_y = 140
+        timer1_box_rect = pygame.Rect(timer1_box_x, timer1_box_y, timer1_box_width, timer1_box_height)
+        pygame.draw.rect(self.screen, (200, 150, 100), timer1_box_rect, border_radius=10)
+        pygame.draw.rect(self.screen, (0, 0, 0), timer1_box_rect, width=2, border_radius=10)
+
+        # Draw only the timer value (5 sec) centered in box
+        timer1_value = self.timer_font_large.render(f"{self.move_time_computer} sec", True, self.timer_text_color)
+        timer1_value_rect = timer1_value.get_rect(center=timer1_box_rect.center)
+        self.screen.blit(timer1_value, timer1_value_rect)
+
+        # Draw second 5 sec timer on BOTTOM RIGHT (facing top-right timer)
+        timer2_box_width = 140
+        timer2_box_height = 70
+        timer2_box_x = board_center_x + 120
+        timer2_box_y = window_h - 150
+        timer2_box_rect = pygame.Rect(timer2_box_x, timer2_box_y, timer2_box_width, timer2_box_height)
+        pygame.draw.rect(self.screen, (150, 180, 220), timer2_box_rect, border_radius=10)
+        pygame.draw.rect(self.screen, (0, 0, 0), timer2_box_rect, width=2, border_radius=10)
+
+        # Draw only the timer value (5 sec) centered in box
+        timer2_value = self.timer_font_large.render(f"{self.move_time_player} sec", True, self.timer_text_color)
+        timer2_value_rect = timer2_value.get_rect(center=timer2_box_rect.center)
+        self.screen.blit(timer2_value, timer2_value_rect)
+
     def run(self) -> None:
         """Run the board scene game loop."""
         while self.running:
             self.running = self._handle_events()
+            self._update_timers()
             self._draw()
             self.clock.tick(FPS)
 
