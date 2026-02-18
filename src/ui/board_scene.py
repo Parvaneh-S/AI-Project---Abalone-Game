@@ -73,6 +73,44 @@ class BoardScene:
         self.player_score = 0
         self.opponent_score = 0
 
+        # Timer variables
+        self.total_time = 15 * 60  # 15 minutes in seconds
+        self.move_time_computer = 5  # 5 seconds per move
+        self.move_time_player = 5
+        self.is_game_timer_running = False
+        self.start_ticks = 0
+
+        self._setup_timers()
+
+    def _setup_timers(self) -> None:
+        """Setup timer display elements."""
+        # Font for timer text
+        self.timer_font_large = pygame.font.Font(None, 44)
+        self.timer_font_small = pygame.font.Font(None, 24)
+        self.timer_text_color = (0, 0, 0)
+
+        # Total time box properties
+        self.total_time_box_width = 200
+        self.total_time_box_height = 80
+        self.total_time_box_color = (180, 140, 100)  # Tan/brown color
+
+    def _update_timers(self) -> None:
+        """Update game timers."""
+        if not self.is_game_timer_running:
+            return
+
+        elapsed = (pygame.time.get_ticks() - self.start_ticks) // 1000
+        self.total_time = max(0, 15 * 60 - elapsed)
+
+        # Update move timer for current player
+        move_elapsed = elapsed % 10
+        if move_elapsed < 5:
+            self.move_time_player = max(0, 5 - move_elapsed)
+            self.move_time_computer = 5
+        else:
+            self.move_time_computer = max(0, 10 - move_elapsed)
+            self.move_time_player = 5
+
     def _setup_back_button(self) -> None:
         """Setup the back button in the top-left corner."""
         # Button properties
@@ -576,11 +614,15 @@ class BoardScene:
             # Start the game
             self.game_started = True
             self.game_paused = False
+            self.is_game_timer_running = True
+            self.start_ticks = pygame.time.get_ticks()
             print("Game started!")
         elif self.game_paused:
             # Resume if paused
             self.game_paused = False
             self.show_pause_modal = False
+            self.is_game_timer_running = True
+            self.start_ticks = pygame.time.get_ticks()
             print("Game resumed!")
         else:
             print("Game is already running!")
@@ -591,11 +633,14 @@ class BoardScene:
             # Pausing the game
             self.game_paused = True
             self.show_pause_modal = True
+            self.is_game_timer_running = False
             print("Game paused!")
         else:
             # Resuming the game (called from modal resume button)
             self.game_paused = False
             self.show_pause_modal = False
+            self.is_game_timer_running = True
+            self.start_ticks = pygame.time.get_ticks()
             print("Game resumed!")
 
     def _stop_game(self) -> None:
@@ -603,6 +648,7 @@ class BoardScene:
         print("Game stopped. Going back to menu...")
         self.game_started = False
         self.game_paused = False
+        self.is_game_timer_running = False
         self.go_back = True
         self.running = False
 
@@ -616,6 +662,10 @@ class BoardScene:
             self.is_human_turn = True
             self.game_paused = False
             self.show_pause_modal = False
+            self.is_game_timer_running = False
+            self.total_time = 15 * 60
+            self.move_time_computer = 5
+            self.move_time_player = 5
             print("Game reset to initial state!")
 
     def _get_pause_modal_geometry(self) -> dict:
@@ -850,6 +900,9 @@ class BoardScene:
         # Draw the score displays above and below the board
         self._draw_opponent_score_display()  # Above board
         self._draw_player_score_display()    # Below board
+
+        # Draw timers
+        self._draw_timers()
 
         # Draw the gray sidebar on the right
         pygame.draw.rect(self.screen, self.sidebar_color, self.sidebar_rect)
@@ -1294,10 +1347,65 @@ class BoardScene:
         ]
         pygame.draw.polygon(self.screen, self.button_icon_color, arrow_points)
 
+    def _draw_timers(self) -> None:
+        """Draw timer boxes and player indicators around the board."""
+        window_w, window_h = self.screen.get_size()
+        available_width = window_w - self.sidebar_width
+        board_center_x = available_width // 2
+
+        # Draw Total Game Time box at TOP CENTER
+        total_box_width = 220
+        total_box_height = 80
+        total_box_x = board_center_x - (total_box_width // 2)
+        total_box_y = 40
+        total_box_rect = pygame.Rect(total_box_x, total_box_y, total_box_width, total_box_height)
+        pygame.draw.rect(self.screen, self.total_time_box_color, total_box_rect, border_radius=10)
+        pygame.draw.rect(self.screen, (0, 0, 0), total_box_rect, width=2, border_radius=10)
+
+        # Draw total time text
+        total_label = self.timer_font_small.render("Total Game Time:", True, self.timer_text_color)
+        total_label_rect = total_label.get_rect(topleft=(total_box_x + 15, total_box_y + 8))
+        self.screen.blit(total_label, total_label_rect)
+
+        minutes = self.total_time // 60
+        seconds = self.total_time % 60
+        total_value = self.timer_font_large.render(f"{minutes}:{seconds:02d}", True, self.timer_text_color)
+        total_value_rect = total_value.get_rect(topleft=(total_box_x + 25, total_box_y + 38))
+        self.screen.blit(total_value, total_value_rect)
+
+        # Draw first 5 sec timer on TOP RIGHT (under total time)
+        timer1_box_width = 140
+        timer1_box_height = 70
+        timer1_box_x = board_center_x + 120
+        timer1_box_y = 140
+        timer1_box_rect = pygame.Rect(timer1_box_x, timer1_box_y, timer1_box_width, timer1_box_height)
+        pygame.draw.rect(self.screen, (200, 150, 100), timer1_box_rect, border_radius=10)
+        pygame.draw.rect(self.screen, (0, 0, 0), timer1_box_rect, width=2, border_radius=10)
+
+        # Draw only the timer value (5 sec) centered in box
+        timer1_value = self.timer_font_large.render(f"{self.move_time_computer} sec", True, self.timer_text_color)
+        timer1_value_rect = timer1_value.get_rect(center=timer1_box_rect.center)
+        self.screen.blit(timer1_value, timer1_value_rect)
+
+        # Draw second 5 sec timer on BOTTOM RIGHT (facing top-right timer)
+        timer2_box_width = 140
+        timer2_box_height = 70
+        timer2_box_x = board_center_x + 120
+        timer2_box_y = window_h - 150
+        timer2_box_rect = pygame.Rect(timer2_box_x, timer2_box_y, timer2_box_width, timer2_box_height)
+        pygame.draw.rect(self.screen, (150, 180, 220), timer2_box_rect, border_radius=10)
+        pygame.draw.rect(self.screen, (0, 0, 0), timer2_box_rect, width=2, border_radius=10)
+
+        # Draw only the timer value (5 sec) centered in box
+        timer2_value = self.timer_font_large.render(f"{self.move_time_player} sec", True, self.timer_text_color)
+        timer2_value_rect = timer2_value.get_rect(center=timer2_box_rect.center)
+        self.screen.blit(timer2_value, timer2_value_rect)
+
     def run(self) -> None:
         """Run the board scene game loop."""
         while self.running:
             self.running = self._handle_events()
+            self._update_timers()
             self._draw()
             self.clock.tick(FPS)
 
