@@ -44,6 +44,7 @@ class GameModePage:
         self.selected_board = None  # Can be 'standard', 'german', or 'belgian'
         self.selected_color = None  # Can be 'black' or 'white'
         self.back_requested = False  # Flag to indicate back button was pressed
+        self.next_requested = False  # Flag to indicate next button was pressed
 
         self._load_image()
         self._setup_button()
@@ -226,9 +227,9 @@ class GameModePage:
         # Create Standard button rectangle
         self.button_rect = pygame.Rect(button_x, button_y, standard_button_width, button_height)
 
-        # Button colors - sage green matching the landing page
-        self.button_color = (164, 182, 156)  # Sage green
-        self.button_hover_color = (184, 202, 176)  # Lighter sage green
+        # Button colors - matching the Start button from landing page
+        self.button_color = (120, 140, 110)  # Darker sage green
+        self.button_hover_color = (140, 160, 130)  # Lighter sage green for hover
         self.button_text_color = (255, 255, 255)  # White
         self.current_button_color = self.button_color
 
@@ -348,6 +349,11 @@ class GameModePage:
                 # Check if Back button was clicked
                 if self.back_button_rect.collidepoint(event.pos):
                     self.back_requested = True
+                # Check if Next button was clicked
+                elif self.next_button_rect.collidepoint(event.pos):
+                    # Only proceed if Standard board and Black circle are selected
+                    if self.selected_board == 'standard' and self.selected_color == 'black':
+                        self.next_requested = True
                 # Check if Standard button was clicked
                 elif self.button_rect.collidepoint(event.pos):
                     self.selected_board = 'standard'
@@ -551,7 +557,11 @@ class GameModePage:
 
             # Check if back button was pressed
             if self.back_requested:
-                return False  # Go back to landing page
+                return False  # Go back to game mode page
+
+            # Check if next button was pressed with valid selections
+            if self.next_requested:
+                return True  # Proceed to board scene
 
             self._draw()
             self.clock.tick(FPS)

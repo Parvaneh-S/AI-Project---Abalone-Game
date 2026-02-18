@@ -27,13 +27,26 @@ class GameModePage:
         self.bg_color = LANDING_BG_COLOR  # Default background color
         self.back_requested = False  # Flag to indicate back button was pressed
         self.continue_requested = False  # Flag to indicate continue to next page
+        self.selected_mode = None  # Store which mode was selected
 
-        self._setup_game_mode_button()
+        self._load_background_color()
+        self._setup_title_button()
+        self._setup_game_mode_buttons()
         self._setup_back_button()
         self._update_positions()
 
-    def _setup_game_mode_button(self) -> None:
-        """Setup the 'Game Mode' button at the top of the page."""
+    def _load_background_color(self) -> None:
+        """Load the standard image and extract its background color."""
+        try:
+            standard_image = pygame.image.load("standard.png")
+            # Extract background color from the top-left corner pixel
+            self.bg_color = standard_image.get_at((0, 0))[:3]  # Get RGB, ignore alpha
+        except (FileNotFoundError, pygame.error):
+            # If image not found, keep the default LANDING_BG_COLOR
+            pass
+
+    def _setup_title_button(self) -> None:
+        """Setup the 'Game Mode' title button at the top center of the page."""
         # Button properties
         button_width = 200
         button_height = 50
@@ -42,19 +55,60 @@ class GameModePage:
         button_x = (WINDOW_W - button_width) // 2  # Horizontally centered
         button_y = 30  # 30px from top
 
-        # Create Game Mode button rectangle
-        self.game_mode_button_rect = pygame.Rect(button_x, button_y, button_width, button_height)
+        # Create title button rectangle
+        self.title_button_rect = pygame.Rect(button_x, button_y, button_width, button_height)
 
-        # Button colors - sage green matching the landing page
-        self.button_color = (164, 182, 156)  # Sage green
-        self.button_hover_color = (184, 202, 176)  # Lighter sage green
-        self.button_text_color = (255, 255, 255)  # White
-        self.current_game_mode_button_color = self.button_color
+        # Button colors - matching the Start button from landing page
+        self.title_button_color = (120, 140, 110)  # Darker sage green
+        self.title_button_text_color = (255, 255, 255)  # White
 
         # Create button text
-        font = pygame.font.Font(None, 28)
-        self.game_mode_button_text = font.render("Game Mode", True, self.button_text_color)
-        self.game_mode_button_text_rect = self.game_mode_button_text.get_rect(center=self.game_mode_button_rect.center)
+        font = pygame.font.Font(None, 36)
+        self.title_button_text = font.render("Game Mode", True, self.title_button_text_color)
+        self.title_button_text_rect = self.title_button_text.get_rect(center=self.title_button_rect.center)
+
+    def _setup_game_mode_buttons(self) -> None:
+        """Setup the three game mode option buttons in the center of the page."""
+        # Button properties
+        button_width = 600
+        button_height = 60
+        button_spacing = 30  # Space between buttons
+
+        # Calculate starting Y position to center all three buttons vertically
+        total_height = (button_height * 3) + (button_spacing * 2)
+        start_y = (WINDOW_H - total_height) // 2
+
+        # Button colors - matching the Start button from landing page
+        self.button_color = (120, 140, 110)  # Darker sage green
+        self.button_hover_color = (140, 160, 130)  # Lighter sage green for hover
+        self.button_text_color = (255, 255, 255)  # White
+
+        # Create three buttons
+        self.mode_buttons = []
+        button_labels = [
+            "Human vs Computer: 40 moves per player",
+            "Computer vs Computer: 40 moves per player",
+            "Human vs Human: 50 moves per player"
+        ]
+
+        font = pygame.font.Font(None, 32)
+
+        for i, label in enumerate(button_labels):
+            button_x = (WINDOW_W - button_width) // 2
+            button_y = start_y + (i * (button_height + button_spacing))
+
+            button_rect = pygame.Rect(button_x, button_y, button_width, button_height)
+            button_text = font.render(label, True, self.button_text_color)
+            button_text_rect = button_text.get_rect(center=button_rect.center)
+
+            self.mode_buttons.append({
+                'rect': button_rect,
+                'text': button_text,
+                'text_rect': button_text_rect,
+                'label': label,
+                'current_color': self.button_color,
+                'mode': i  # 0, 1, or 2
+            })
 
     def _setup_back_button(self) -> None:
         """Setup the 'Back' button at the top left of the page."""
@@ -80,13 +134,27 @@ class GameModePage:
         # Get current window dimensions
         window_w, window_h = self.screen.get_size()
 
-        # Update Game Mode button position
-        if hasattr(self, 'game_mode_button_rect'):
-            button_x = (window_w - self.game_mode_button_rect.width) // 2
-            button_y = 30  # 30px from top
-            self.game_mode_button_rect.x = button_x
-            self.game_mode_button_rect.y = button_y
-            self.game_mode_button_text_rect.center = self.game_mode_button_rect.center
+        # Update title button position
+        if hasattr(self, 'title_button_rect'):
+            button_x = (window_w - self.title_button_rect.width) // 2
+            self.title_button_rect.x = button_x
+            self.title_button_text_rect.center = self.title_button_rect.center
+
+        # Update game mode buttons positions
+        if hasattr(self, 'mode_buttons'):
+            button_width = 600
+            button_height = 60
+            button_spacing = 30
+
+            total_height = (button_height * 3) + (button_spacing * 2)
+            start_y = (window_h - total_height) // 2
+
+            for i, button in enumerate(self.mode_buttons):
+                button_x = (window_w - button_width) // 2
+                button_y = start_y + (i * (button_height + button_spacing))
+                button['rect'].x = button_x
+                button['rect'].y = button_y
+                button['text_rect'].center = button['rect'].center
 
         # Back button position doesn't need to change (stays at top left)
 
@@ -107,9 +175,13 @@ class GameModePage:
                 # Check if Back button was clicked
                 if self.back_button_rect.collidepoint(event.pos):
                     self.back_requested = True
-                # Check if Game Mode button was clicked
-                elif self.game_mode_button_rect.collidepoint(event.pos):
-                    self.continue_requested = True
+                else:
+                    # Check if any game mode button was clicked
+                    for button in self.mode_buttons:
+                        if button['rect'].collidepoint(event.pos):
+                            self.selected_mode = button['mode']
+                            self.continue_requested = True
+                            break
             if event.type == pygame.KEYDOWN:
                 if event.key == pygame.K_ESCAPE:
                     return False
@@ -117,11 +189,12 @@ class GameModePage:
         # Update button hover states
         mouse_pos = pygame.mouse.get_pos()
 
-        # Game Mode button hover
-        if self.game_mode_button_rect.collidepoint(mouse_pos):
-            self.current_game_mode_button_color = self.button_hover_color
-        else:
-            self.current_game_mode_button_color = self.button_color
+        # Update hover state for each game mode button
+        for button in self.mode_buttons:
+            if button['rect'].collidepoint(mouse_pos):
+                button['current_color'] = self.button_hover_color
+            else:
+                button['current_color'] = self.button_color
 
         # Back button hover
         if self.back_button_rect.collidepoint(mouse_pos):
@@ -136,12 +209,19 @@ class GameModePage:
         # Fill background with color
         self.screen.fill(self.bg_color)
 
-        # Draw the Game Mode button
-        pygame.draw.rect(self.screen, self.current_game_mode_button_color, self.game_mode_button_rect, border_radius=10)
-        # Draw button border
-        pygame.draw.rect(self.screen, (255, 255, 255), self.game_mode_button_rect, width=3, border_radius=10)
-        # Draw button text
-        self.screen.blit(self.game_mode_button_text, self.game_mode_button_text_rect)
+        # Draw the title "Game Mode" button at the top
+        pygame.draw.rect(self.screen, self.title_button_color, self.title_button_rect, border_radius=10)
+        pygame.draw.rect(self.screen, (255, 255, 255), self.title_button_rect, width=3, border_radius=10)
+        self.screen.blit(self.title_button_text, self.title_button_text_rect)
+
+        # Draw all game mode buttons
+        for button in self.mode_buttons:
+            # Draw button
+            pygame.draw.rect(self.screen, button['current_color'], button['rect'], border_radius=10)
+            # Draw button border
+            pygame.draw.rect(self.screen, (255, 255, 255), button['rect'], width=3, border_radius=10)
+            # Draw button text
+            self.screen.blit(button['text'], button['text_rect'])
 
         # Draw the Back button
         pygame.draw.rect(self.screen, self.current_back_button_color, self.back_button_rect, border_radius=10)
