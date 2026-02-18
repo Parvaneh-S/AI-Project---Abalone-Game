@@ -2,7 +2,7 @@
 Board scene for the Abalone game.
 """
 import pygame
-from src.constants import FPS, BG_COLOR, BOARD_CENTER
+from src.constants import FPS, BG_COLOR, CELL_RADIUS, BLACK_COLOR, WHITE_COLOR
 from src.ui.board_renderer import BoardRenderer
 
 
@@ -31,15 +31,32 @@ class BoardScene:
         # Turn tracking (True = human turn, False = computer turn)
         self.is_human_turn = True
 
+        # Drag and drop state
+        self.dragging = False
+        self.dragged_marble = None  # (row, col) of the marble being dragged
+        self.drag_offset = (0, 0)  # Offset from marble center to mouse position
+        self.player_color = BLACK_COLOR if not invert_colors else WHITE_COLOR  # Player's chosen color
+
         self._setup_back_button()
         self._setup_sidebar()
         self._setup_turn_text()
+        self._setup_score_displays()
 
         # Calculate board center in the middle of free space (left edge to sidebar)
         window_w, window_h = self.screen.get_size()
         available_width = window_w - self.sidebar_width
         board_center = (available_width // 2, window_h // 2)
         self.board_renderer = BoardRenderer(board_center, invert_colors=invert_colors, board_layout=board_layout)
+
+        # Initialize marble positions from board renderer
+        self.marble_positions = self.board_renderer._get_example_marbles().copy()
+
+        # Move history tracking
+        self.move_history = []  # List of tuples: (move_notation, marble_color)
+
+        # Score tracking
+        self.player_score = 0
+        self.opponent_score = 0
 
     def _setup_back_button(self) -> None:
         """Setup the back button in the top-left corner."""
@@ -77,6 +94,10 @@ class BoardScene:
         self.horizontal_box_color = (180, 180, 180)  # Lighter gray color
         self.horizontal_box_margin = 15  # Margin from the sidebar edges
 
+        # Bottom control box properties (lighter gray at bottom)
+        self.bottom_box_height = 100  # Height of the bottom control box
+        self.bottom_box_color = (180, 180, 180)  # Lighter gray color (same as top)
+
         # Create sidebar rectangle on the right side
         self.sidebar_rect = pygame.Rect(window_w - self.sidebar_width, 0, self.sidebar_width, window_h)
 
@@ -88,6 +109,85 @@ class BoardScene:
             self.horizontal_box_height - self.horizontal_box_margin  # Height with top margin (bottom touches sidebar)
         )
 
+        # Move history section properties (under the top box)
+        self.move_history_height = 40  # Height for move history header
+        self.move_history_y = self.horizontal_box_height + self.horizontal_box_margin  # Position below top box
+
+        # Setup move history text
+        self.move_history_font = pygame.font.Font(None, 28)
+        self.move_history_text_color = (50, 50, 50)  # Dark gray text
+        self.move_history_text = self.move_history_font.render("Move History:", True, self.move_history_text_color)
+
+        # Create move history section rectangle
+        self.move_history_rect = pygame.Rect(
+            window_w - self.sidebar_width + self.horizontal_box_margin,  # Left margin
+            self.move_history_y,  # Below the top box
+            self.sidebar_width - (2 * self.horizontal_box_margin),  # Width with margins
+            self.move_history_height
+        )
+
+        # Create bottom control box rectangle at the bottom of the sidebar with margins
+        self.bottom_box_rect = pygame.Rect(
+            window_w - self.sidebar_width + self.horizontal_box_margin,  # Left margin
+            window_h - self.bottom_box_height,  # Position at bottom
+            self.sidebar_width - (2 * self.horizontal_box_margin),  # Width with left and right margins
+            self.bottom_box_height - self.horizontal_box_margin  # Height with bottom margin
+        )
+
+        # Undo section properties (above the bottom control box)
+        self.undo_section_height = 60  # Height for undo section
+        self.undo_section_y = window_h - self.bottom_box_height - self.undo_section_height - self.horizontal_box_margin
+
+        # Create undo section rectangle
+        self.undo_section_rect = pygame.Rect(
+            window_w - self.sidebar_width + self.horizontal_box_margin,  # Left margin
+            self.undo_section_y,  # Above the bottom box
+            self.sidebar_width - (2 * self.horizontal_box_margin),  # Width with margins
+            self.undo_section_height
+        )
+
+        # Load undo icon
+        self.undo_icon_image = None
+        self.undo_icon_scaled = None
+        try:
+            self.undo_icon_image = pygame.image.load("undo.png")
+            # Scale to fit in circular button
+            icon_size = 28  # Icon size for button
+            self.undo_icon_scaled = pygame.transform.scale(self.undo_icon_image, (icon_size, icon_size))
+        except (FileNotFoundError, pygame.error) as e:
+            print(f"Warning: Could not load undo.png: {e}")
+
+        # Setup undo text
+        self.undo_font = pygame.font.Font(None, 28)
+        self.undo_text_color = (50, 50, 50)  # Dark gray text
+        self.undo_text = self.undo_font.render("Undo last Move", True, self.undo_text_color)
+
+        # Setup undo button (circular button next to text)
+        self.undo_button_size = 40  # Diameter of circular button
+        self.undo_button_bg_color = (255, 255, 255)  # White background
+        self.undo_button_hover_color = (230, 230, 230)  # Light gray on hover
+        self.undo_button_hover = False
+
+        # Position button to the right of the text
+        text_width = self.undo_text.get_width()
+        button_spacing = 15  # Space between text and button
+        total_width = text_width + button_spacing + self.undo_button_size
+
+        # Calculate button center position
+        start_x = self.undo_section_rect.centerx - (total_width // 2)
+        button_center_x = start_x + text_width + button_spacing + (self.undo_button_size // 2)
+        button_center_y = self.undo_section_rect.centery
+
+        self.undo_button_rect = pygame.Rect(
+            button_center_x - self.undo_button_size // 2,
+            button_center_y - self.undo_button_size // 2,
+            self.undo_button_size,
+            self.undo_button_size
+        )
+
+        # Setup control buttons
+        self._setup_control_buttons()
+
     def _setup_turn_text(self) -> None:
         """Setup the turn indicator text."""
         # Font for turn text
@@ -98,9 +198,100 @@ class BoardScene:
         self.human_turn_text = self.turn_font.render("Your Turn", True, self.turn_text_color)
         self.computer_turn_text = self.turn_font.render("Computer Turn", True, self.turn_text_color)
 
+    def _setup_score_displays(self) -> None:
+        """Setup the score displays above and below the board."""
+        # Font for score text
+        self.score_font = pygame.font.Font(None, 28)
+        self.score_text_color = (50, 50, 50)  # Dark gray text
+
+        # Player score label text (below board)
+        self.player_score_label_text = self.score_font.render("Your Score:", True, self.score_text_color)
+
+        # Opponent score label text (above board)
+        self.opponent_score_label_text = self.score_font.render("Opponent Score:", True, self.score_text_color)
+
+        # Circular button properties
+        self.score_button_radius = 20  # Radius of circular button (40px diameter)
+        self.score_button_bg_color = (255, 255, 255)  # White background
+        self.score_button_border_color = (100, 100, 100)  # Gray border
+        self.score_button_text_color = (50, 50, 50)  # Dark gray text
+
+        # Position will be calculated dynamically in draw methods
+        # based on the actual board hexagon edges
+
     def toggle_turn(self) -> None:
         """Toggle between human and computer turns."""
         self.is_human_turn = not self.is_human_turn
+
+    def _cell_to_notation(self, cell: tuple) -> str:
+        """
+        Convert (row, col) to cell notation.
+        Rows are labeled A-I where row 0 (top in display) = I, row 8 (bottom in display) = A.
+        Columns are numbered 1-9 from left to right.
+
+        Based on the standard Abalone notation:
+        - Row I (top, 5 cells): I1, I2, I3, I4, I5
+        - Row E (middle, 9 cells): E1, E2, E3, E4, E5, E6, E7, E8, E9
+        - Row A (bottom, 5 cells): A1, A2, A3, A4, A5
+
+        Args:
+            cell: Tuple (row, col) where row 0 is top
+
+        Returns:
+            Cell notation string (e.g., 'I1', 'E5', 'A1')
+        """
+        row, col = cell
+
+        # Row labels: I-A (top to bottom, row 0 = I, row 8 = A)
+        # Invert the row: A is at bottom (row 8), I is at top (row 0)
+        row_label = chr(ord('I') - row)
+
+        # Column number: Simply 1-indexed position (left to right)
+        col_number = col + 1
+
+        return f"{row_label}{col_number}"
+
+    def _setup_control_buttons(self) -> None:
+        """Setup the control buttons (start, pause, stop, reset) in the bottom box."""
+        # Button dimensions - made smaller to fit better
+        button_size = 40  # Circular buttons (reduced from 50)
+        button_spacing = 8  # Space between buttons (reduced from 10)
+
+        # Calculate positions for 4 buttons in a row
+        total_width = (button_size * 4) + (button_spacing * 3)
+        start_x = self.bottom_box_rect.centerx - (total_width // 2)
+        button_y = self.bottom_box_rect.centery
+
+        # Button colors - white circles with black icons
+        self.button_bg_color = (255, 255, 255)  # White for button background
+        self.button_hover_color = (230, 230, 230)  # Light gray on hover
+        self.button_icon_color = (0, 0, 0)  # Black icons
+
+        # Load reset icon image
+        self.reset_icon_image = None
+        self.reset_icon_scaled = None
+        try:
+            self.reset_icon_image = pygame.image.load("reset_icon.png")
+            # Scale to fit within button (slightly smaller than button size for padding)
+            icon_size = int(button_size * 0.7)
+            self.reset_icon_scaled = pygame.transform.scale(self.reset_icon_image, (icon_size, icon_size))
+        except (FileNotFoundError, pygame.error) as e:
+            print(f"Warning: Could not load reset_icon.png: {e}")
+            # Will fall back to drawing the icon programmatically
+
+        # Create button rectangles (circular)
+        self.start_button = pygame.Rect(start_x, button_y - button_size // 2, button_size, button_size)
+        self.pause_button = pygame.Rect(start_x + button_size + button_spacing, button_y - button_size // 2, button_size, button_size)
+        self.stop_button = pygame.Rect(start_x + (button_size + button_spacing) * 2, button_y - button_size // 2, button_size, button_size)
+        self.reset_button = pygame.Rect(start_x + (button_size + button_spacing) * 3, button_y - button_size // 2, button_size, button_size)
+
+        # Store all buttons for easy iteration
+        self.control_buttons = [
+            {'rect': self.start_button, 'type': 'start', 'hover': False},
+            {'rect': self.pause_button, 'type': 'pause', 'hover': False},
+            {'rect': self.stop_button, 'type': 'stop', 'hover': False},
+            {'rect': self.reset_button, 'type': 'reset', 'hover': False}
+        ]
 
     def _update_positions(self) -> None:
         """Update positions based on current window size."""
@@ -110,7 +301,11 @@ class BoardScene:
         # Calculate board center in the middle of free space (left edge to sidebar)
         available_width = window_w - self.sidebar_width
         new_board_center = (available_width // 2, window_h // 2)
+
+        # Update board renderer but keep marble positions
+        old_positions = self.marble_positions.copy()
         self.board_renderer = BoardRenderer(new_board_center, invert_colors=self.invert_colors, board_layout=self.board_layout)
+        self.marble_positions = old_positions
 
         # Back button stays in top-left corner, no need to update
 
@@ -124,6 +319,79 @@ class BoardScene:
             self.sidebar_width - (2 * self.horizontal_box_margin),  # Width with left and right margins
             self.horizontal_box_height - self.horizontal_box_margin  # Height with top margin (bottom touches sidebar)
         )
+
+        # Update move history section position
+        self.move_history_y = self.horizontal_box_height + self.horizontal_box_margin
+        self.move_history_rect = pygame.Rect(
+            window_w - self.sidebar_width + self.horizontal_box_margin,  # Left margin
+            self.move_history_y,  # Below the top box
+            self.sidebar_width - (2 * self.horizontal_box_margin),  # Width with margins
+            self.move_history_height
+        )
+
+        # Update bottom control box position and size with margins
+        self.bottom_box_rect = pygame.Rect(
+            window_w - self.sidebar_width + self.horizontal_box_margin,  # Left margin
+            window_h - self.bottom_box_height,  # Position at bottom
+            self.sidebar_width - (2 * self.horizontal_box_margin),  # Width with left and right margins
+            self.bottom_box_height - self.horizontal_box_margin  # Height with bottom margin
+        )
+
+        # Update undo section position (above the bottom control box)
+        self.undo_section_y = window_h - self.bottom_box_height - self.undo_section_height - self.horizontal_box_margin
+        self.undo_section_rect = pygame.Rect(
+            window_w - self.sidebar_width + self.horizontal_box_margin,  # Left margin
+            self.undo_section_y,  # Above the bottom box
+            self.sidebar_width - (2 * self.horizontal_box_margin),  # Width with margins
+            self.undo_section_height
+        )
+
+        # Rescale undo icon if it exists
+        if self.undo_icon_image:
+            icon_size = 28
+            self.undo_icon_scaled = pygame.transform.scale(self.undo_icon_image, (icon_size, icon_size))
+
+        # Update undo button position
+        text_width = self.undo_text.get_width()
+        button_spacing = 15
+        total_width = text_width + button_spacing + self.undo_button_size
+
+        start_x = self.undo_section_rect.centerx - (total_width // 2)
+        button_center_x = start_x + text_width + button_spacing + (self.undo_button_size // 2)
+        button_center_y = self.undo_section_rect.centery
+
+        self.undo_button_rect = pygame.Rect(
+            button_center_x - self.undo_button_size // 2,
+            button_center_y - self.undo_button_size // 2,
+            self.undo_button_size,
+            self.undo_button_size
+        )
+
+
+        # Update control button positions - using smaller size to fit better
+        button_size = 40  # Reduced from 50
+        button_spacing = 8  # Reduced from 10
+        total_width = (button_size * 4) + (button_spacing * 3)
+        start_x = self.bottom_box_rect.centerx - (total_width // 2)
+        button_y = self.bottom_box_rect.centery
+
+        # Rescale reset icon for new button size
+        if self.reset_icon_image:
+            icon_size = int(button_size * 0.7)
+            self.reset_icon_scaled = pygame.transform.scale(self.reset_icon_image, (icon_size, icon_size))
+
+        self.start_button = pygame.Rect(start_x, button_y - button_size // 2, button_size, button_size)
+        self.pause_button = pygame.Rect(start_x + button_size + button_spacing, button_y - button_size // 2, button_size, button_size)
+        self.stop_button = pygame.Rect(start_x + (button_size + button_spacing) * 2, button_y - button_size // 2, button_size, button_size)
+        self.reset_button = pygame.Rect(start_x + (button_size + button_spacing) * 3, button_y - button_size // 2, button_size, button_size)
+
+        # Update control_buttons list
+        self.control_buttons = [
+            {'rect': self.start_button, 'type': 'start', 'hover': False},
+            {'rect': self.pause_button, 'type': 'pause', 'hover': False},
+            {'rect': self.stop_button, 'type': 'stop', 'hover': False},
+            {'rect': self.reset_button, 'type': 'reset', 'hover': False}
+        ]
 
     def _handle_events(self) -> bool:
         """
@@ -140,6 +408,19 @@ class BoardScene:
         else:
             self.current_back_button_color = self.back_button_color
 
+        # Update control buttons hover state
+        for button in self.control_buttons:
+            if button['rect'].collidepoint(mouse_pos):
+                button['hover'] = True
+            else:
+                button['hover'] = False
+
+        # Update undo button hover state
+        if self.undo_button_rect.collidepoint(mouse_pos):
+            self.undo_button_hover = True
+        else:
+            self.undo_button_hover = False
+
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 return False
@@ -151,12 +432,221 @@ class BoardScene:
                 if self.back_button_rect.collidepoint(event.pos):
                     self.go_back = True
                     return False
+
+                # Check if control buttons were clicked
+                for button in self.control_buttons:
+                    if button['rect'].collidepoint(event.pos):
+                        self._handle_control_button_click(button['type'])
+                        continue
+
+                # Check if undo button was clicked
+                if self.undo_button_rect.collidepoint(event.pos):
+                    self._handle_undo_button_click()
+                    continue
+
+                # Check if a marble was clicked for dragging
+                if self.is_human_turn:
+                    marble_at_pos = self._get_marble_at_position(event.pos)
+                    if marble_at_pos and self.marble_positions.get(marble_at_pos) == self.player_color:
+                        self.dragging = True
+                        self.dragged_marble = marble_at_pos
+                        marble_center = self._get_marble_screen_position(marble_at_pos)
+                        self.drag_offset = (event.pos[0] - marble_center[0], event.pos[1] - marble_center[1])
+
+            if event.type == pygame.MOUSEBUTTONUP:
+                if self.dragging and self.dragged_marble:
+                    # Try to drop the marble
+                    drop_cell = self._get_cell_at_position(event.pos)
+                    if drop_cell and self._is_valid_move(self.dragged_marble, drop_cell):
+                        # Record the move in history
+                        from_notation = self._cell_to_notation(self.dragged_marble)
+                        to_notation = self._cell_to_notation(drop_cell)
+                        move_notation = f"{from_notation}{to_notation}"
+                        marble_color = self.marble_positions[self.dragged_marble]
+                        self.move_history.append((move_notation, marble_color))
+
+                        # Move the marble
+                        self.marble_positions[drop_cell] = self.marble_positions[self.dragged_marble]
+                        del self.marble_positions[self.dragged_marble]
+
+                    # Reset dragging state
+                    self.dragging = False
+                    self.dragged_marble = None
+                    self.drag_offset = (0, 0)
+
         return True
+
+    def _handle_control_button_click(self, button_type: str) -> None:
+        """
+        Handle control button clicks.
+
+        Args:
+            button_type: Type of button clicked ('start', 'pause', 'stop', 'reset')
+        """
+        if button_type == 'start':
+            print("Start button clicked")
+            # TODO: Implement start game logic
+        elif button_type == 'pause':
+            print("Pause button clicked")
+            # TODO: Implement pause game logic
+        elif button_type == 'stop':
+            print("Stop button clicked")
+            # TODO: Implement stop game logic
+        elif button_type == 'reset':
+            print("Reset button clicked")
+            # TODO: Implement reset game logic
+
+    def _handle_undo_button_click(self) -> None:
+        """Handle undo button click."""
+        print("Undo button clicked")
+        # TODO: Implement undo last move logic
+
+    def _get_marble_at_position(self, pos: tuple) -> tuple:
+        """
+        Get the marble (row, col) at the given screen position.
+
+        Args:
+            pos: Screen position (x, y)
+
+        Returns:
+            Tuple (row, col) if a marble is at that position, None otherwise
+        """
+        for (row, col), color in self.marble_positions.items():
+            marble_center = self._get_marble_screen_position((row, col))
+            dist_sq = (pos[0] - marble_center[0])**2 + (pos[1] - marble_center[1])**2
+            if dist_sq <= CELL_RADIUS**2:
+                return (row, col)
+        return None
+
+    def _get_cell_at_position(self, pos: tuple) -> tuple:
+        """
+        Get the cell (row, col) at the given screen position.
+
+        Args:
+            pos: Screen position (x, y)
+
+        Returns:
+            Tuple (row, col) if position is over a valid cell, None otherwise
+        """
+        for row, row_cells in enumerate(self.board_renderer.cell_centers):
+            for col, (x, y) in enumerate(row_cells):
+                dist_sq = (pos[0] - x)**2 + (pos[1] - y)**2
+                if dist_sq <= CELL_RADIUS**2:
+                    return (row, col)
+        return None
+
+    def _get_marble_screen_position(self, marble: tuple) -> tuple:
+        """
+        Get the screen position (x, y) for a given marble (row, col).
+
+        Args:
+            marble: Tuple (row, col)
+
+        Returns:
+            Tuple (x, y) screen coordinates
+        """
+        row, col = marble
+        if row < len(self.board_renderer.cell_centers) and col < len(self.board_renderer.cell_centers[row]):
+            return self.board_renderer.cell_centers[row][col]
+        return (0, 0)
+
+    def _is_valid_move(self, from_cell: tuple, to_cell: tuple) -> bool:
+        """
+        Check if a move from from_cell to to_cell is valid.
+        A move is valid if:
+        1. The destination cell is empty
+        2. The destination cell is adjacent to the source cell
+
+        Args:
+            from_cell: Source cell (row, col)
+            to_cell: Destination cell (row, col)
+
+        Returns:
+            True if the move is valid, False otherwise
+        """
+        # Check if destination is empty
+        if to_cell in self.marble_positions:
+            return False
+
+        # Check if destination is adjacent
+        return self._is_adjacent(from_cell, to_cell)
+
+    def _is_adjacent(self, cell1: tuple, cell2: tuple) -> bool:
+        """
+        Check if two cells are adjacent on the hexagonal board.
+
+        Args:
+            cell1: First cell (row, col)
+            cell2: Second cell (row, col)
+
+        Returns:
+            True if cells are adjacent, False otherwise
+        """
+        row1, col1 = cell1
+        row2, col2 = cell2
+
+        # Same row neighbors
+        if row1 == row2 and abs(col1 - col2) == 1:
+            return True
+
+        # Adjacent rows
+        if abs(row1 - row2) == 1:
+            # For hexagonal grid, adjacent row cells can be:
+            # - same column
+            # - column +1 or -1 depending on which direction
+            if row1 < 4:  # Top half of board
+                # Moving down increases columns on right side
+                if row2 == row1 + 1:
+                    return col2 == col1 or col2 == col1 + 1
+                else:  # row2 == row1 - 1
+                    return col2 == col1 or col2 == col1 - 1
+            elif row1 == 4:  # Middle row
+                if row2 == row1 + 1:
+                    return col2 == col1 or col2 == col1 - 1
+                else:  # row2 == row1 - 1
+                    return col2 == col1 or col2 == col1 + 1
+            else:  # Bottom half of board (row1 > 4)
+                # Moving down decreases columns on left side
+                if row2 == row1 + 1:
+                    return col2 == col1 or col2 == col1 - 1
+                else:  # row2 == row1 - 1
+                    return col2 == col1 or col2 == col1 + 1
+
+        return False
+
+    def _get_valid_destinations(self, marble: tuple) -> list:
+        """
+        Get all valid destination cells for a given marble.
+
+        Args:
+            marble: Source marble (row, col)
+
+        Returns:
+            List of (row, col) tuples representing valid destination cells
+        """
+        valid_destinations = []
+
+        # Check all cells on the board
+        for row, row_cells in enumerate(self.board_renderer.cell_centers):
+            for col in range(len(row_cells)):
+                cell = (row, col)
+                # Check if this cell is a valid destination
+                if self._is_valid_move(marble, cell):
+                    valid_destinations.append(cell)
+
+        return valid_destinations
+
 
     def _draw(self) -> None:
         """Draw the board scene."""
         self.screen.fill(BG_COLOR)
-        self.board_renderer.draw(self.screen)
+
+        # Draw the board with current marble positions
+        self._draw_board_and_marbles()
+
+        # Draw the score displays above and below the board
+        self._draw_opponent_score_display()  # Above board
+        self._draw_player_score_display()    # Below board
 
         # Draw the gray sidebar on the right
         pygame.draw.rect(self.screen, self.sidebar_color, self.sidebar_rect)
@@ -169,6 +659,18 @@ class BoardScene:
         turn_text_rect = turn_text.get_rect(center=self.horizontal_box_rect.center)
         self.screen.blit(turn_text, turn_text_rect)
 
+        # Draw the move history text
+        self._draw_move_history()
+
+        # Draw the undo section
+        self._draw_undo_section()
+
+        # Draw the bottom control box
+        pygame.draw.rect(self.screen, self.bottom_box_color, self.bottom_box_rect)
+
+        # Draw control buttons
+        self._draw_control_buttons()
+
         # Draw the back button
         pygame.draw.rect(self.screen, self.current_back_button_color, self.back_button_rect, border_radius=8)
         # Draw button border
@@ -176,7 +678,324 @@ class BoardScene:
         # Draw button text
         self.screen.blit(self.back_button_text, self.back_button_text_rect)
 
+        # Draw dragged marble on top if dragging
+        if self.dragging and self.dragged_marble:
+            mouse_pos = pygame.mouse.get_pos()
+            drag_x = mouse_pos[0] - self.drag_offset[0]
+            drag_y = mouse_pos[1] - self.drag_offset[1]
+            color = self.marble_positions.get(self.dragged_marble)
+            if color:
+                # Draw highlight ring around the dragged marble (gold)
+                pygame.draw.circle(self.screen, (255, 215, 0), (drag_x, drag_y), CELL_RADIUS + 5, 4)
+                # Draw shadow
+                pygame.draw.circle(self.screen, (120, 120, 120), (drag_x, drag_y), CELL_RADIUS + 1)
+                # Draw marble
+                pygame.draw.circle(self.screen, color, (drag_x, drag_y), CELL_RADIUS)
+
         pygame.display.flip()
+
+    def _draw_board_and_marbles(self) -> None:
+        """Draw the board hexagon and all marbles."""
+        # Draw the hexagonal board
+        from src.constants import CELL_MARGIN, RIM_WIDTH, BORDER_COLOR, BOARD_FILL, EMPTY_COLOR
+
+        # Inner hex should fully contain all circles (radius + margin)
+        inner_hex = self.board_renderer._hex_polygon_around_cells(extra=CELL_MARGIN)
+        # Outer hex is inner hex expanded by rim width
+        outer_hex = self.board_renderer._hex_polygon_around_cells(extra=CELL_MARGIN + RIM_WIDTH)
+
+        # Draw rim and inner fill
+        pygame.draw.polygon(self.screen, BORDER_COLOR, outer_hex)
+        pygame.draw.polygon(self.screen, BOARD_FILL, inner_hex)
+
+        # Get valid destinations if a marble is being dragged
+        valid_destinations = []
+        if self.dragging and self.dragged_marble:
+            valid_destinations = self._get_valid_destinations(self.dragged_marble)
+
+        # Draw all cells and marbles
+        for row, row_cells in enumerate(self.board_renderer.cell_centers):
+            for col, (x, y) in enumerate(row_cells):
+                cell = (row, col)
+
+                # Skip the dragged marble (will be drawn at mouse position)
+                if self.dragging and self.dragged_marble == cell:
+                    # Draw empty cell where the marble was picked up from
+                    pygame.draw.circle(self.screen, (120, 120, 120), (x, y), CELL_RADIUS + 1)
+                    pygame.draw.circle(self.screen, EMPTY_COLOR, (x, y), CELL_RADIUS)
+                    # Draw a highlight ring at the original position to show it's selected
+                    pygame.draw.circle(self.screen, (255, 215, 0), (x, y), CELL_RADIUS + 4, 3)  # Gold ring
+                else:
+                    # Draw marble or empty cell
+                    color = self.marble_positions.get(cell, EMPTY_COLOR)
+                    pygame.draw.circle(self.screen, (120, 120, 120), (x, y), CELL_RADIUS + 1)
+                    pygame.draw.circle(self.screen, color, (x, y), CELL_RADIUS)
+
+                    # If this is a valid destination, draw a small white solid ball inside
+                    if cell in valid_destinations:
+                        # Draw a small white solid ball to indicate valid destination
+                        ball_radius = 6  # Small solid ball
+                        pygame.draw.circle(self.screen, (255, 255, 255), (x, y), ball_radius)  # White solid ball
+
+    def _draw_move_history(self) -> None:
+        """Draw the move history header text and list of moves with colored indicators."""
+        # Draw header text at the left side of the move history section
+        text_x = self.move_history_rect.x + 10  # Small left padding
+        text_y = self.move_history_rect.centery - (self.move_history_text.get_height() // 2)
+        self.screen.blit(self.move_history_text, (text_x, text_y))
+
+        # Draw move history entries below the header
+        if self.move_history:
+            # Font for move entries
+            move_font = pygame.font.Font(None, 22)
+            move_text_color = (50, 50, 50)  # Dark gray text
+            ball_radius = 5  # Small solid ball indicator
+
+            # Starting position for move list (below the header)
+            list_start_y = self.move_history_y + self.move_history_height + 5
+            line_height = 25  # Height for each move entry
+
+            # Calculate the area available for move history
+            available_height = self.undo_section_y - list_start_y - 10
+            max_moves_to_display = int(available_height / line_height)
+
+            # Display moves from most recent backwards (up to max that fit)
+            moves_to_show = self.move_history[-max_moves_to_display:] if len(self.move_history) > max_moves_to_display else self.move_history
+
+            for i, (move_notation, marble_color) in enumerate(moves_to_show):
+                # Position for this move entry
+                entry_y = list_start_y + i * line_height
+
+                # Draw colored ball indicator
+                ball_x = self.move_history_rect.x + 15
+                ball_y = entry_y + line_height // 2
+                pygame.draw.circle(self.screen, marble_color, (ball_x, ball_y), ball_radius)
+
+                # Draw move notation text
+                move_text = move_font.render(move_notation, True, move_text_color)
+                text_x = ball_x + ball_radius + 8  # Position text after the ball
+                text_y = entry_y + (line_height - move_text.get_height()) // 2
+                self.screen.blit(move_text, (text_x, text_y))
+
+    def _draw_undo_section(self) -> None:
+        """Draw the undo section with text and circular button."""
+        # Calculate positions for text and button
+        text_width = self.undo_text.get_width()
+        button_spacing = 15
+        total_width = text_width + button_spacing + self.undo_button_size
+
+        # Starting X position to center the content
+        start_x = self.undo_section_rect.centerx - (total_width // 2)
+        center_y = self.undo_section_rect.centery
+
+        # Draw text on the left
+        text_x = start_x
+        text_y = center_y - (self.undo_text.get_height() // 2)
+        self.screen.blit(self.undo_text, (text_x, text_y))
+
+        # Draw circular button on the right
+        button_center = self.undo_button_rect.center
+        button_radius = self.undo_button_size // 2
+
+        # Choose color based on hover state
+        button_color = self.undo_button_hover_color if self.undo_button_hover else self.undo_button_bg_color
+        pygame.draw.circle(self.screen, button_color, button_center, button_radius)
+
+        # Draw undo icon on button if available
+        if self.undo_icon_scaled:
+            icon_rect = self.undo_icon_scaled.get_rect(center=button_center)
+            self.screen.blit(self.undo_icon_scaled, icon_rect)
+
+    def _draw_opponent_score_display(self) -> None:
+        """Draw the opponent score display above the board."""
+        from src.constants import CELL_MARGIN, RIM_WIDTH, CELL_RADIUS
+        import math
+
+        # Calculate the top edge of the hexagon board
+        # Get the top row cells (row 0)
+        top_row_cells = self.board_renderer.cell_centers[0]
+        top_center_y = top_row_cells[0][1]  # Y coordinate of top row
+
+        # Calculate padding for hexagon (same as used in _hex_polygon_around_cells)
+        padding = CELL_RADIUS + CELL_MARGIN + RIM_WIDTH
+        cos30 = math.sqrt(3) / 2
+
+        # Top edge of hexagon
+        hexagon_top_y = top_center_y - padding * cos30
+
+        # Position score display just above the hexagon (with small gap)
+        gap_above_hexagon = 20  # 20px gap between hexagon and score display
+        # Position so the bottom of the text/button is at hexagon_top_y - gap
+        score_display_bottom_y = int(hexagon_top_y) - gap_above_hexagon
+
+        # Calculate score display y (top of the text)
+        score_display_y = score_display_bottom_y - self.opponent_score_label_text.get_height()
+
+        # Calculate horizontal center based on board center
+        window_w, _ = self.screen.get_size()
+        available_width = window_w - self.sidebar_width
+        board_center_x = available_width // 2
+
+        # Calculate positions for text and button
+        text_button_spacing = 15  # Space between text and button
+        total_width = self.opponent_score_label_text.get_width() + text_button_spacing + (self.score_button_radius * 2)
+
+        # Center the entire score display
+        start_x = board_center_x - (total_width // 2)
+        text_x = start_x
+        button_center_x = start_x + self.opponent_score_label_text.get_width() + text_button_spacing + self.score_button_radius
+
+        # Draw "Opponent Score:" text
+        self.screen.blit(self.opponent_score_label_text, (text_x, score_display_y))
+
+        # Draw circular button with score
+        button_center = (button_center_x, score_display_y + self.opponent_score_label_text.get_height() // 2)
+
+        # Draw white circle with gray border
+        pygame.draw.circle(self.screen, self.score_button_bg_color, button_center, self.score_button_radius)
+        pygame.draw.circle(self.screen, self.score_button_border_color, button_center, self.score_button_radius, 2)
+
+        # Draw score text in the center of the circle
+        score_text = self.score_font.render(str(self.opponent_score), True, self.score_button_text_color)
+        score_text_rect = score_text.get_rect(center=button_center)
+        self.screen.blit(score_text, score_text_rect)
+
+    def _draw_player_score_display(self) -> None:
+        """Draw the player score display below the board."""
+        from src.constants import CELL_MARGIN, RIM_WIDTH, CELL_RADIUS
+        import math
+
+        # Calculate the bottom edge of the hexagon board
+        # Get the bottom row cells (row 8)
+        bottom_row_cells = self.board_renderer.cell_centers[8]
+        bottom_center_y = bottom_row_cells[0][1]  # Y coordinate of bottom row
+
+        # Calculate padding for hexagon (same as used in _hex_polygon_around_cells)
+        padding = CELL_RADIUS + CELL_MARGIN + RIM_WIDTH
+        cos30 = math.sqrt(3) / 2
+
+        # Bottom edge of hexagon
+        hexagon_bottom_y = bottom_center_y + padding * cos30
+
+        # Position score display just below the hexagon (with small gap)
+        gap_below_hexagon = 20  # 20px gap between hexagon and score display
+        score_display_y = int(hexagon_bottom_y) + gap_below_hexagon
+
+        # Calculate horizontal center based on board center
+        window_w, _ = self.screen.get_size()
+        available_width = window_w - self.sidebar_width
+        board_center_x = available_width // 2
+
+        # Calculate positions for text and button
+        text_button_spacing = 15  # Space between text and button
+        total_width = self.player_score_label_text.get_width() + text_button_spacing + (self.score_button_radius * 2)
+
+        # Center the entire score display
+        start_x = board_center_x - (total_width // 2)
+        text_x = start_x
+        button_center_x = start_x + self.player_score_label_text.get_width() + text_button_spacing + self.score_button_radius
+
+        # Draw "Your Score:" text
+        self.screen.blit(self.player_score_label_text, (text_x, score_display_y))
+
+        # Draw circular button with score
+        button_center = (button_center_x, score_display_y + self.player_score_label_text.get_height() // 2)
+
+        # Draw white circle with gray border
+        pygame.draw.circle(self.screen, self.score_button_bg_color, button_center, self.score_button_radius)
+        pygame.draw.circle(self.screen, self.score_button_border_color, button_center, self.score_button_radius, 2)
+
+        # Draw score text in the center of the circle
+        score_text = self.score_font.render(str(self.player_score), True, self.score_button_text_color)
+        score_text_rect = score_text.get_rect(center=button_center)
+        self.screen.blit(score_text, score_text_rect)
+
+    def _draw_control_buttons(self) -> None:
+        """Draw the control buttons (start, pause, stop, reset) with icons."""
+        for button in self.control_buttons:
+            # Choose color based on hover state
+            color = self.button_hover_color if button['hover'] else self.button_bg_color
+
+            # Draw circular button background
+            center = button['rect'].center
+            radius = button['rect'].width // 2
+            pygame.draw.circle(self.screen, color, center, radius)
+
+            # Draw button icon based on type
+            if button['type'] == 'start':
+                self._draw_play_icon(center, radius)
+            elif button['type'] == 'pause':
+                self._draw_pause_icon(center, radius)
+            elif button['type'] == 'stop':
+                self._draw_stop_icon(center, radius)
+            elif button['type'] == 'reset':
+                # Use image if available, otherwise draw programmatically
+                if self.reset_icon_scaled:
+                    # Center the image within the button
+                    icon_rect = self.reset_icon_scaled.get_rect(center=center)
+                    self.screen.blit(self.reset_icon_scaled, icon_rect)
+                else:
+                    self._draw_reset_icon(center, radius)
+
+    def _draw_play_icon(self, center: tuple, radius: int) -> None:
+        """Draw a play/start triangle icon."""
+        # Triangle pointing right
+        size = radius * 0.5
+        points = [
+            (center[0] - size * 0.4, center[1] - size),
+            (center[0] - size * 0.4, center[1] + size),
+            (center[0] + size * 0.8, center[1])
+        ]
+        pygame.draw.polygon(self.screen, self.button_icon_color, points)
+
+    def _draw_pause_icon(self, center: tuple, radius: int) -> None:
+        """Draw a pause (two vertical bars) icon."""
+        size = radius * 0.5
+        bar_width = size * 0.4
+        bar_height = size * 1.6
+
+        # Left bar
+        left_bar = pygame.Rect(center[0] - size * 0.6, center[1] - bar_height / 2, bar_width, bar_height)
+        pygame.draw.rect(self.screen, self.button_icon_color, left_bar)
+
+        # Right bar
+        right_bar = pygame.Rect(center[0] + size * 0.2, center[1] - bar_height / 2, bar_width, bar_height)
+        pygame.draw.rect(self.screen, self.button_icon_color, right_bar)
+
+    def _draw_stop_icon(self, center: tuple, radius: int) -> None:
+        """Draw a stop (square) icon."""
+        size = radius * 0.6
+        square = pygame.Rect(center[0] - size / 2, center[1] - size / 2, size, size)
+        pygame.draw.rect(self.screen, self.button_icon_color, square)
+
+    def _draw_reset_icon(self, center: tuple, radius: int) -> None:
+        """Draw a reset (circular arrow) icon - simple refresh symbol."""
+        import math
+
+        size = radius * 0.55
+        thickness = 3
+
+        # Draw main circular arc (almost complete circle with gap at top)
+        rect = pygame.Rect(center[0] - size, center[1] - size, size * 2, size * 2)
+
+        # Draw arc from about 45 degrees to 315 degrees (clockwise, leaving gap at top-right)
+        start_angle = math.pi * 0.25  # 45 degrees
+        end_angle = math.pi * 1.75    # 315 degrees
+        pygame.draw.arc(self.screen, self.button_icon_color, rect, start_angle, end_angle, thickness)
+
+        # Draw arrow head pointing to the right/clockwise at the top
+        arrow_size = size * 0.4
+        # Position arrow at the end of the arc (around 315 degrees / -45 degrees)
+        arrow_x = center[0] + size * math.cos(-math.pi / 4)
+        arrow_y = center[1] + size * math.sin(-math.pi / 4)
+
+        # Arrow pointing clockwise (to the right and slightly down)
+        arrow_points = [
+            (arrow_x + arrow_size * 0.6, arrow_y),  # Tip pointing right
+            (arrow_x - arrow_size * 0.3, arrow_y - arrow_size * 0.5),  # Top back
+            (arrow_x - arrow_size * 0.3, arrow_y + arrow_size * 0.5)   # Bottom back
+        ]
+        pygame.draw.polygon(self.screen, self.button_icon_color, arrow_points)
 
     def run(self) -> None:
         """Run the board scene game loop."""
