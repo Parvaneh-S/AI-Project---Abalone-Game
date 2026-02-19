@@ -36,6 +36,8 @@ class BoardScene:
         self.dragging = False
         self.dragged_marble = None  # (row, col) of the marble being dragged
         self.drag_offset = (0, 0)  # Offset from marble center to mouse position
+        self.mouse_down_pos = None  # Position where mouse button was pressed (for click vs drag detection)
+        self._marble_before_drag = None  # Selection state before the current mouse-down
         self.player_color = BLACK_COLOR if not invert_colors else WHITE_COLOR  # Player's chosen color
 
         # Game state management
@@ -573,9 +575,10 @@ class BoardScene:
                 if self.is_human_turn and self.game_started and not self.game_paused:
                     marble_at_pos = self._get_marble_at_position(event.pos)
                     if marble_at_pos and self.marble_positions.get(marble_at_pos) == self.player_color:
-                        # Select this marble (or reselect if already selected)
+                        # Always start dragging; deselection is resolved on MOUSEBUTTONUP
+                        self.mouse_down_pos = event.pos
+                        self._marble_before_drag = self.selected_marble  # remember prior selection
                         self.selected_marble = marble_at_pos
-                        # Start dragging
                         self.dragging = True
                         self.dragged_marble = marble_at_pos
                         marble_center = self._get_marble_screen_position(marble_at_pos)
@@ -583,6 +586,28 @@ class BoardScene:
 
             if event.type == pygame.MOUSEBUTTONUP:
                 if self.dragging and self.dragged_marble:
+                    # Determine if the mouse moved enough to count as a drag
+                    drag_threshold = 5  # pixels
+                    if self.mouse_down_pos:
+                        dx = event.pos[0] - self.mouse_down_pos[0]
+                        dy = event.pos[1] - self.mouse_down_pos[1]
+                        was_drag = (dx * dx + dy * dy) > drag_threshold * drag_threshold
+                    else:
+                        was_drag = True
+
+                    if not was_drag:
+                        # It was a plain click — deselect only if this marble was already
+                        # selected before the mouse-down (i.e. the user tapped to deselect)
+                        released_on = self._get_marble_at_position(event.pos)
+                        if released_on == self.dragged_marble and self._marble_before_drag == self.dragged_marble:
+                            self.selected_marble = None  # deselect
+                        # else: marble stays selected (new selection on tap)
+                        self.dragging = False
+                        self.dragged_marble = None
+                        self.drag_offset = (0, 0)
+                        self.mouse_down_pos = None
+                        self._marble_before_drag = None
+                        continue
                     # Try to drop the marble
                     drop_cell = self._get_cell_at_position(event.pos)
                     if drop_cell and self._is_valid_move(self.dragged_marble, drop_cell):
@@ -615,6 +640,8 @@ class BoardScene:
                     self.dragging = False
                     self.dragged_marble = None
                     self.drag_offset = (0, 0)
+                    self.mouse_down_pos = None
+                    self._marble_before_drag = None
 
         return True
 
