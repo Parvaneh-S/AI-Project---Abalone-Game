@@ -38,39 +38,6 @@ class GameApp:
                 icon = self._create_icon()
                 pygame.display.set_icon(icon)
 
-    def _create_icon(self) -> pygame.Surface:
-        """
-        Create a simple hexagon icon for the window.
-
-        Returns:
-            Pygame surface containing the icon
-        """
-        icon_size = 32
-        icon = pygame.Surface((icon_size, icon_size), pygame.SRCALPHA)
-
-        # Create hexagon vertices for icon
-        cx, cy = icon_size // 2, icon_size // 2
-        radius = icon_size // 2 - 2
-
-        cos30 = math.sqrt(3) / 2
-        sin30 = 0.5
-
-        hex_points = [
-            (cx - radius * sin30, cy - radius * cos30),
-            (cx + radius * sin30, cy - radius * cos30),
-            (cx + radius, cy),
-            (cx + radius * sin30, cy + radius * cos30),
-            (cx - radius * sin30, cy + radius * cos30),
-            (cx - radius, cy),
-        ]
-
-        # Draw brown hexagon border
-        pygame.draw.polygon(icon, BORDER_COLOR, hex_points)
-        # Draw smaller beige hexagon inside
-        inner_points = [(cx + (p[0]-cx)*0.7, cy + (p[1]-cy)*0.7) for p in hex_points]
-        pygame.draw.polygon(icon, BOARD_FILL, inner_points)
-
-        return icon
 
     def run(self) -> None:
         """Run the game application."""
