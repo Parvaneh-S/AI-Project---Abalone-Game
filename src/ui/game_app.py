@@ -2,8 +2,7 @@
 Game application manager.
 """
 import pygame
-import math
-from src.constants import WINDOW_W, WINDOW_H, BORDER_COLOR, BOARD_FILL
+from src.constants import WINDOW_W, WINDOW_H
 from src.ui.landing_page import LandingPage
 from src.ui.game_mode_page import GameModePage
 from src.ui.board_layout_page import GameModePage as BoardLayoutPage
@@ -34,9 +33,7 @@ class GameApp:
                 icon = pygame.image.load("icon.jpg")
                 pygame.display.set_icon(icon)
             except (FileNotFoundError, pygame.error):
-
-                icon = self._create_icon()
-                pygame.display.set_icon(icon)
+                pass  # No icon available
 
 
     def run(self) -> None:

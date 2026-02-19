@@ -100,18 +100,6 @@ class BoardScene:
         self.total_time_box_height = 80
         self.total_time_box_color = (180, 140, 100)  # Tan/brown color
 
-    def set_move_limit(self, max_moves: int) -> None:
-        """
-        Set the move limit for both players.
-        Called from game configuration before game starts.
-
-        Args:
-            max_moves: Maximum moves per player (e.g., 40)
-        """
-        self.max_moves_per_player = max_moves
-        self.player_moves_remaining = max_moves
-        self.computer_moves_remaining = max_moves
-        print(f"Move limit set to {max_moves} per player")
 
     def _update_timers(self) -> None:
         """Update game timers."""

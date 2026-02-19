@@ -2,12 +2,10 @@
 Board renderer for the Abalone game.
 """
 import math
-import pygame
 from typing import List, Tuple, Dict
 from src.constants import (
     CELL_RADIUS, CELL_MARGIN, RIM_WIDTH, DX, DY,
-    ROW_COUNTS, BORDER_COLOR, BOARD_FILL,
-    EMPTY_COLOR, WHITE_COLOR, BLACK_COLOR
+    ROW_COUNTS, WHITE_COLOR, BLACK_COLOR
 )
 
 
@@ -240,28 +238,4 @@ class BoardRenderer:
 
         return colors
 
-    def draw(self, screen: pygame.Surface) -> None:
-        """
-        Draw the board on the given surface.
-
-        Args:
-            screen: Pygame surface to draw on
-        """
-        # Inner hex should fully contain all circles (radius + margin)
-        inner_hex = self._hex_polygon_around_cells(extra=CELL_MARGIN)
-
-        # Outer hex is inner hex expanded by rim width
-        outer_hex = self._hex_polygon_around_cells(extra=CELL_MARGIN + RIM_WIDTH)
-
-        # Draw rim and inner fill
-        pygame.draw.polygon(screen, BORDER_COLOR, outer_hex)
-        pygame.draw.polygon(screen, BOARD_FILL, inner_hex)
-
-        # Draw circles (all will sit inside inner_hex now)
-        marble_map = self._get_example_marbles()
-        for r, row in enumerate(self.cell_centers):
-            for c, (x, y) in enumerate(row):
-                color = marble_map.get((r, c), EMPTY_COLOR)
-                pygame.draw.circle(screen, (120, 120, 120), (x, y), CELL_RADIUS + 1)
-                pygame.draw.circle(screen, color, (x, y), CELL_RADIUS)
 
