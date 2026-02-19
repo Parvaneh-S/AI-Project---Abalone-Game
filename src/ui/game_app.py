@@ -25,7 +25,7 @@ class GameApp:
 
     def _set_window_icon(self) -> None:
         """Set the window icon."""
-        # Try to load icon from file, otherwise create programmatic one
+
         try:
             icon = pygame.image.load("icon.png")
             pygame.display.set_icon(icon)
@@ -34,7 +34,7 @@ class GameApp:
                 icon = pygame.image.load("icon.jpg")
                 pygame.display.set_icon(icon)
             except (FileNotFoundError, pygame.error):
-                # Fall back to programmatic icon
+
                 icon = self._create_icon()
                 pygame.display.set_icon(icon)
 
