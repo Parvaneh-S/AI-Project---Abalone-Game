@@ -571,6 +571,31 @@ class BoardScene:
                     self._handle_undo_button_click()
                     continue
 
+                # Check if a destination ball was clicked to move the selected marble
+                if self.is_human_turn and self.game_started and not self.game_paused and self.selected_marble:
+                    clicked_cell = self._get_cell_at_position(event.pos)
+                    if clicked_cell and clicked_cell in self._get_valid_destinations(self.selected_marble):
+                        # Move the selected marble to the clicked destination
+                        from_notation = self._cell_to_notation(self.selected_marble)
+                        to_notation = self._cell_to_notation(clicked_cell)
+                        move_notation = f"{from_notation}{to_notation}"
+                        marble_color = self.marble_positions[self.selected_marble]
+                        self.move_history.append((move_notation, marble_color))
+
+                        self.marble_positions[clicked_cell] = self.marble_positions[self.selected_marble]
+                        del self.marble_positions[self.selected_marble]
+
+                        self.player_moves_remaining -= 1
+                        print(f"Player move made! Remaining moves: {self.player_moves_remaining}")
+
+                        if self.player_moves_remaining <= 0:
+                            print("Player has reached move limit!")
+                            self.game_paused = True
+                            self.show_pause_modal = True
+
+                        self.selected_marble = None
+                        continue
+
                 # Check if a marble was clicked for dragging (only if game is started and not paused)
                 if self.is_human_turn and self.game_started and not self.game_paused:
                     marble_at_pos = self._get_marble_at_position(event.pos)
