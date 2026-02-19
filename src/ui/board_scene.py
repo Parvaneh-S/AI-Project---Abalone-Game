@@ -1507,7 +1507,7 @@ class BoardScene:
 
         # Responsive padding
         top_padding = int(30 * scale_factor)
-        bottom_padding = int(120 * scale_factor)
+        bottom_padding = int(170 * scale_factor)  # Increased from 120 to move timers and text upward
         right_offset = int(200 * scale_factor)  # Increased from 80 to move timers more right
 
         # Draw Total Game Time box at TOP CENTER
@@ -1520,7 +1520,7 @@ class BoardScene:
         # Draw total time text with responsive font
         label_font = pygame.font.Font(None, int(20 * scale_factor))
         total_label = label_font.render("Total Game Time:", True, self.timer_text_color)
-        total_label_rect = total_label.get_rect(topleft=(total_box_x + int(10 * scale_factor), total_box_y + int(5 * scale_factor)))
+        total_label_rect = total_label.get_rect(center=(total_box_rect.centerx, total_box_rect.centery - int(15 * scale_factor)))
         self.screen.blit(total_label, total_label_rect)
 
         # Draw total time value
@@ -1528,14 +1528,14 @@ class BoardScene:
         minutes = self.total_time // 60
         seconds = self.total_time % 60
         total_value = value_font.render(f"{minutes}:{seconds:02d}", True, self.timer_text_color)
-        total_value_rect = total_value.get_rect(topleft=(total_box_x + int(20 * scale_factor), total_box_y + int(35 * scale_factor)))
+        total_value_rect = total_value.get_rect(center=(total_box_rect.centerx, total_box_rect.centery + int(15 * scale_factor)))
         self.screen.blit(total_value, total_value_rect)
 
         # Draw first 5 sec timer on TOP RIGHT (under total time)
         timer1_box_x = board_center_x + right_offset
         timer1_box_y = total_box_y + total_box_height + int(20 * scale_factor)
         timer1_box_rect = pygame.Rect(timer1_box_x, timer1_box_y, timer_box_width, timer_box_height)
-        pygame.draw.rect(self.screen, (200, 150, 100), timer1_box_rect, border_radius=8)
+        pygame.draw.rect(self.screen, (211, 211, 211), timer1_box_rect, border_radius=8)
         pygame.draw.rect(self.screen, (0, 0, 0), timer1_box_rect, width=2, border_radius=8)
 
         # Draw only the timer value (5 sec) centered in box
@@ -1547,7 +1547,7 @@ class BoardScene:
         timer2_box_x = board_center_x + right_offset
         timer2_box_y = window_h - bottom_padding
         timer2_box_rect = pygame.Rect(timer2_box_x, timer2_box_y, timer_box_width, timer_box_height)
-        pygame.draw.rect(self.screen, (150, 180, 220), timer2_box_rect, border_radius=8)
+        pygame.draw.rect(self.screen, (211, 211, 211), timer2_box_rect, border_radius=8)
         pygame.draw.rect(self.screen, (0, 0, 0), timer2_box_rect, width=2, border_radius=8)
 
         # Draw only the timer value (5 sec) centered in box
@@ -1558,14 +1558,14 @@ class BoardScene:
         # Draw move limit displays below the timer boxes
         move_limit_font = pygame.font.Font(None, int(26 * scale_factor))
 
-        # Computer move limit (below top-right timer)
+        # Computer move limit (below top-right timer) - aligned with timer box
         computer_move_text = move_limit_font.render(f"Moves: {self.computer_moves_remaining}/{self.max_moves_per_player}", True, self.timer_text_color)
-        computer_move_rect = computer_move_text.get_rect(topleft=(timer1_box_x - int(15 * scale_factor), timer1_box_y + timer_box_height + int(8 * scale_factor)))
+        computer_move_rect = computer_move_text.get_rect(topleft=(timer1_box_x, timer1_box_y + timer_box_height + int(8 * scale_factor)))
         self.screen.blit(computer_move_text, computer_move_rect)
 
-        # Player move limit (below bottom-right timer)
+        # Player move limit (below bottom-right timer) - aligned with timer box
         player_move_text = move_limit_font.render(f"Moves: {self.player_moves_remaining}/{self.max_moves_per_player}", True, self.timer_text_color)
-        player_move_rect = player_move_text.get_rect(topleft=(timer2_box_x - int(15 * scale_factor), timer2_box_y - move_limit_font.get_height() - int(8 * scale_factor)))
+        player_move_rect = player_move_text.get_rect(topleft=(timer2_box_x, timer2_box_y - move_limit_font.get_height() - int(8 * scale_factor)))
         self.screen.blit(player_move_text, player_move_rect)
 
     def run(self) -> None:
