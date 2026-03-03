@@ -1,7 +1,7 @@
 """
 Abalone Game - Main Entry Point
 
-A strategic board game with AI opponents.
+At this point, only the UI for Abalone game has been implemented, and it has no logic yet.
 This is the main entry point that initializes and runs the game application.
 """
 import sys

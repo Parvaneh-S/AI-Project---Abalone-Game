@@ -36,6 +36,8 @@ class BoardScene:
         self.dragging = False
         self.dragged_marble = None  # (row, col) of the marble being dragged
         self.drag_offset = (0, 0)  # Offset from marble center to mouse position
+        self.mouse_down_pos = None  # Position where mouse button was pressed (for click vs drag detection)
+        self._marble_before_drag = None  # Selection state before the current mouse-down
         self.player_color = BLACK_COLOR if not invert_colors else WHITE_COLOR  # Player's chosen color
 
         # Game state management
@@ -43,6 +45,7 @@ class BoardScene:
         self.game_started = False  # Game needs START button to begin
         self.initial_marble_positions = None  # Store initial board state for reset
         self.show_pause_modal = False  # Whether to show pause modal
+        self.show_stop_modal = False  # Whether to show stop confirmation modal
 
         # Button tooltip tracking
         self.tooltip_text = None  # Current tooltip text to display
@@ -80,6 +83,11 @@ class BoardScene:
         self.is_game_timer_running = False
         self.start_ticks = 0
 
+        # Move limit variables (set by game configuration)
+        self.max_moves_per_player = 40  # Default move limit per player
+        self.player_moves_remaining = 40  # Player's remaining moves
+        self.computer_moves_remaining = 40  # Computer's remaining moves
+
         self._setup_timers()
 
     def _setup_timers(self) -> None:
@@ -93,6 +101,7 @@ class BoardScene:
         self.total_time_box_width = 200
         self.total_time_box_height = 80
         self.total_time_box_color = (180, 140, 100)  # Tan/brown color
+
 
     def _update_timers(self) -> None:
         """Update game timers."""
@@ -535,6 +544,14 @@ class BoardScene:
                         return False
                     continue
 
+                # If stop modal is showing, handle modal button clicks
+                if self.show_stop_modal:
+                    self._handle_stop_modal_click(event.pos)
+                    # If yes was clicked in modal, running will be False
+                    if not self.running:
+                        return False
+                    continue
+
                 # Check if back button was clicked
                 if self.back_button_rect.collidepoint(event.pos):
                     self.go_back = True
@@ -554,13 +571,39 @@ class BoardScene:
                     self._handle_undo_button_click()
                     continue
 
+                # Check if a destination ball was clicked to move the selected marble
+                if self.is_human_turn and self.game_started and not self.game_paused and self.selected_marble:
+                    clicked_cell = self._get_cell_at_position(event.pos)
+                    if clicked_cell and clicked_cell in self._get_valid_destinations(self.selected_marble):
+                        # Move the selected marble to the clicked destination
+                        from_notation = self._cell_to_notation(self.selected_marble)
+                        to_notation = self._cell_to_notation(clicked_cell)
+                        move_notation = f"{from_notation}{to_notation}"
+                        marble_color = self.marble_positions[self.selected_marble]
+                        self.move_history.append((move_notation, marble_color))
+
+                        self.marble_positions[clicked_cell] = self.marble_positions[self.selected_marble]
+                        del self.marble_positions[self.selected_marble]
+
+                        self.player_moves_remaining -= 1
+                        print(f"Player move made! Remaining moves: {self.player_moves_remaining}")
+
+                        if self.player_moves_remaining <= 0:
+                            print("Player has reached move limit!")
+                            self.game_paused = True
+                            self.show_pause_modal = True
+
+                        self.selected_marble = None
+                        continue
+
                 # Check if a marble was clicked for dragging (only if game is started and not paused)
                 if self.is_human_turn and self.game_started and not self.game_paused:
                     marble_at_pos = self._get_marble_at_position(event.pos)
                     if marble_at_pos and self.marble_positions.get(marble_at_pos) == self.player_color:
-                        # Select this marble (or reselect if already selected)
+                        # Always start dragging; deselection is resolved on MOUSEBUTTONUP
+                        self.mouse_down_pos = event.pos
+                        self._marble_before_drag = self.selected_marble  # remember prior selection
                         self.selected_marble = marble_at_pos
-                        # Start dragging
                         self.dragging = True
                         self.dragged_marble = marble_at_pos
                         marble_center = self._get_marble_screen_position(marble_at_pos)
@@ -568,6 +611,28 @@ class BoardScene:
 
             if event.type == pygame.MOUSEBUTTONUP:
                 if self.dragging and self.dragged_marble:
+                    # Determine if the mouse moved enough to count as a drag
+                    drag_threshold = 5  # pixels
+                    if self.mouse_down_pos:
+                        dx = event.pos[0] - self.mouse_down_pos[0]
+                        dy = event.pos[1] - self.mouse_down_pos[1]
+                        was_drag = (dx * dx + dy * dy) > drag_threshold * drag_threshold
+                    else:
+                        was_drag = True
+
+                    if not was_drag:
+                        # It was a plain click — deselect only if this marble was already
+                        # selected before the mouse-down (i.e. the user tapped to deselect)
+                        released_on = self._get_marble_at_position(event.pos)
+                        if released_on == self.dragged_marble and self._marble_before_drag == self.dragged_marble:
+                            self.selected_marble = None  # deselect
+                        # else: marble stays selected (new selection on tap)
+                        self.dragging = False
+                        self.dragged_marble = None
+                        self.drag_offset = (0, 0)
+                        self.mouse_down_pos = None
+                        self._marble_before_drag = None
+                        continue
                     # Try to drop the marble
                     drop_cell = self._get_cell_at_position(event.pos)
                     if drop_cell and self._is_valid_move(self.dragged_marble, drop_cell):
@@ -582,6 +647,17 @@ class BoardScene:
                         self.marble_positions[drop_cell] = self.marble_positions[self.dragged_marble]
                         del self.marble_positions[self.dragged_marble]
 
+                        # Decrement player's move limit
+                        self.player_moves_remaining -= 1
+                        print(f"Player move made! Remaining moves: {self.player_moves_remaining}")
+
+                        # Check if player reached move limit
+                        if self.player_moves_remaining <= 0:
+                            print("Player has reached move limit!")
+                            self.game_paused = True
+                            self.show_pause_modal = True
+                            # TODO: Show game over message or end game
+
                         # Clear selection after a successful move
                         self.selected_marble = None
 
@@ -589,6 +665,8 @@ class BoardScene:
                     self.dragging = False
                     self.dragged_marble = None
                     self.drag_offset = (0, 0)
+                    self.mouse_down_pos = None
+                    self._marble_before_drag = None
 
         return True
 
@@ -644,13 +722,32 @@ class BoardScene:
             print("Game resumed!")
 
     def _stop_game(self) -> None:
-        """Stop the game and go back to menu."""
+        """Show stop confirmation modal."""
+        self.show_stop_modal = True
+        print("Stop confirmation modal shown")
+
+    def _confirm_stop_game(self) -> None:
+        """Actually stop the game and go back to menu."""
         print("Game stopped. Going back to menu...")
         self.game_started = False
         self.game_paused = False
+        self.show_stop_modal = False
         self.is_game_timer_running = False
         self.go_back = True
         self.running = False
+
+    def _handle_stop_modal_click(self, pos: tuple) -> None:
+        """Handle clicks on stop modal buttons."""
+        geom = self._get_stop_modal_geometry()
+
+        # Check clicks
+        if geom['yes_button'].collidepoint(pos):
+            # User confirmed - stop the game
+            self._confirm_stop_game()
+        elif geom['no_button'].collidepoint(pos):
+            # User cancelled - just close the modal
+            self.show_stop_modal = False
+            print("Stop cancelled")
 
     def _reset_game(self) -> None:
         """Reset the game board to initial state."""
@@ -699,6 +796,39 @@ class BoardScene:
             'modal_height': modal_height,
             'resume_button': pygame.Rect(resume_x, buttons_y, button_width, button_height),
             'quit_button': pygame.Rect(quit_x, buttons_y, button_width, button_height)
+        }
+
+    def _get_stop_modal_geometry(self) -> dict:
+        """Get stop modal dimensions and button positions.
+
+        Returns:
+            Dictionary with modal and button geometry
+        """
+        window_w, window_h = self.screen.get_size()
+
+        # Modal dimensions
+        modal_width = 450
+        modal_height = 250
+        modal_x = (window_w - modal_width) // 2
+        modal_y = (window_h - modal_height) // 2
+
+        # Button dimensions
+        button_width = 150
+        button_height = 50
+        button_spacing = 20
+        buttons_y = modal_y + modal_height - 80
+
+        # Calculate button positions
+        yes_x = modal_x + (modal_width - button_width * 2 - button_spacing) // 2
+        no_x = yes_x + button_width + button_spacing
+
+        return {
+            'modal_x': modal_x,
+            'modal_y': modal_y,
+            'modal_width': modal_width,
+            'modal_height': modal_height,
+            'yes_button': pygame.Rect(yes_x, buttons_y, button_width, button_height),
+            'no_button': pygame.Rect(no_x, buttons_y, button_width, button_height)
         }
 
     def _handle_pause_modal_click(self, pos: tuple) -> None:
@@ -956,6 +1086,10 @@ class BoardScene:
         if self.tooltip_text:
             self._draw_tooltip()
 
+        # Draw stop confirmation modal if showing
+        if self.show_stop_modal:
+            self._draw_stop_modal()
+
         pygame.display.flip()
 
     def _draw_tooltip(self) -> None:
@@ -1017,8 +1151,8 @@ class BoardScene:
         # Get mouse position for hover effects
         mouse_pos = pygame.mouse.get_pos()
 
-        # Draw Resume button
-        resume_color = (100, 200, 100) if geom['resume_button'].collidepoint(mouse_pos) else (80, 180, 80)
+        # Draw Resume button - sage green to match project theme
+        resume_color = (184, 202, 176) if geom['resume_button'].collidepoint(mouse_pos) else (164, 182, 156)  # Sage green
         pygame.draw.rect(self.screen, resume_color, geom['resume_button'], border_radius=10)
         pygame.draw.rect(self.screen, (255, 255, 255), geom['resume_button'], width=2, border_radius=10)
 
@@ -1027,8 +1161,8 @@ class BoardScene:
         resume_text_rect = resume_text.get_rect(center=geom['resume_button'].center)
         self.screen.blit(resume_text, resume_text_rect)
 
-        # Draw Quit button
-        quit_color = (200, 80, 80) if geom['quit_button'].collidepoint(mouse_pos) else (180, 60, 60)
+        # Draw Quit button - muted brown/red to match board colors
+        quit_color = (160, 120, 110) if geom['quit_button'].collidepoint(mouse_pos) else (140, 100, 90)  # Muted brown
         pygame.draw.rect(self.screen, quit_color, geom['quit_button'], border_radius=10)
         pygame.draw.rect(self.screen, (255, 255, 255), geom['quit_button'], width=2, border_radius=10)
 
@@ -1037,6 +1171,55 @@ class BoardScene:
         quit_text_rect = quit_text.get_rect(center=geom['quit_button'].center)
         self.screen.blit(quit_text, quit_text_rect)
 
+    def _draw_stop_modal(self) -> None:
+        """Draw stop confirmation modal with Yes and No buttons."""
+        window_w, window_h = self.screen.get_size()
+        geom = self._get_stop_modal_geometry()
+
+        # Semi-transparent overlay
+        overlay = pygame.Surface((window_w, window_h), pygame.SRCALPHA)
+        overlay.fill((0, 0, 0, 150))  # Darker overlay
+        self.screen.blit(overlay, (0, 0))
+
+        # Draw modal background
+        modal_rect = pygame.Rect(geom['modal_x'], geom['modal_y'], geom['modal_width'], geom['modal_height'])
+        pygame.draw.rect(self.screen, (240, 240, 240), modal_rect, border_radius=15)
+        pygame.draw.rect(self.screen, (100, 100, 100), modal_rect, width=3, border_radius=15)
+
+        # Draw "Stop Game" title
+        title_font = pygame.font.Font(None, 56)
+        title_text = title_font.render("Stop Game", True, (50, 50, 50))
+        title_rect = title_text.get_rect(center=(geom['modal_x'] + geom['modal_width'] // 2, geom['modal_y'] + 40))
+        self.screen.blit(title_text, title_rect)
+
+        # Draw confirmation text
+        confirm_font = pygame.font.Font(None, 28)
+        confirm_text = confirm_font.render("Are you sure you want to stop?", True, (50, 50, 50))
+        confirm_rect = confirm_text.get_rect(center=(geom['modal_x'] + geom['modal_width'] // 2, geom['modal_y'] + geom['modal_height'] // 2 - 20))
+        self.screen.blit(confirm_text, confirm_rect)
+
+        # Get mouse position for hover effects
+        mouse_pos = pygame.mouse.get_pos()
+
+        # Draw Yes button - sage green to match project theme
+        yes_color = (184, 202, 176) if geom['yes_button'].collidepoint(mouse_pos) else (164, 182, 156)  # Sage green
+        pygame.draw.rect(self.screen, yes_color, geom['yes_button'], border_radius=10)
+        pygame.draw.rect(self.screen, (255, 255, 255), geom['yes_button'], width=2, border_radius=10)
+
+        yes_font = pygame.font.Font(None, 36)
+        yes_text = yes_font.render("Yes", True, (255, 255, 255))
+        yes_text_rect = yes_text.get_rect(center=geom['yes_button'].center)
+        self.screen.blit(yes_text, yes_text_rect)
+
+        # Draw No button - muted brown/red to match board colors
+        no_color = (160, 120, 110) if geom['no_button'].collidepoint(mouse_pos) else (140, 100, 90)  # Muted brown
+        pygame.draw.rect(self.screen, no_color, geom['no_button'], border_radius=10)
+        pygame.draw.rect(self.screen, (255, 255, 255), geom['no_button'], width=2, border_radius=10)
+
+        no_font = pygame.font.Font(None, 36)
+        no_text = no_font.render("No", True, (255, 255, 255))
+        no_text_rect = no_text.get_rect(center=geom['no_button'].center)
+        self.screen.blit(no_text, no_text_rect)
 
     def _draw_board_and_marbles(self) -> None:
         """Draw the board hexagon and all marbles."""
@@ -1353,53 +1536,77 @@ class BoardScene:
         available_width = window_w - self.sidebar_width
         board_center_x = available_width // 2
 
+        # Responsive sizing based on window dimensions
+        # Scale boxes based on available width
+        scale_factor = max(0.7, min(available_width / 1200, 1.2))  # Scale between 0.7x and 1.2x
+
+        total_box_width = int(200 * scale_factor)
+        total_box_height = int(70 * scale_factor)
+        timer_box_width = int(120 * scale_factor)
+        timer_box_height = int(60 * scale_factor)
+
+        # Responsive padding
+        top_padding = int(30 * scale_factor)
+        bottom_padding = int(170 * scale_factor)  # Increased from 120 to move timers and text upward
+        right_offset = int(200 * scale_factor)  # Increased from 80 to move timers more right
+
         # Draw Total Game Time box at TOP CENTER
-        total_box_width = 220
-        total_box_height = 80
         total_box_x = board_center_x - (total_box_width // 2)
-        total_box_y = 40
+        total_box_y = top_padding
         total_box_rect = pygame.Rect(total_box_x, total_box_y, total_box_width, total_box_height)
         pygame.draw.rect(self.screen, self.total_time_box_color, total_box_rect, border_radius=10)
         pygame.draw.rect(self.screen, (0, 0, 0), total_box_rect, width=2, border_radius=10)
 
-        # Draw total time text
-        total_label = self.timer_font_small.render("Total Game Time:", True, self.timer_text_color)
-        total_label_rect = total_label.get_rect(topleft=(total_box_x + 15, total_box_y + 8))
+        # Draw total time text with responsive font
+        label_font = pygame.font.Font(None, int(20 * scale_factor))
+        total_label = label_font.render("Total Game Time:", True, self.timer_text_color)
+        total_label_rect = total_label.get_rect(center=(total_box_rect.centerx, total_box_rect.centery - int(15 * scale_factor)))
         self.screen.blit(total_label, total_label_rect)
 
+        # Draw total time value
+        value_font = pygame.font.Font(None, int(38 * scale_factor))
         minutes = self.total_time // 60
         seconds = self.total_time % 60
-        total_value = self.timer_font_large.render(f"{minutes}:{seconds:02d}", True, self.timer_text_color)
-        total_value_rect = total_value.get_rect(topleft=(total_box_x + 25, total_box_y + 38))
+        total_value = value_font.render(f"{minutes}:{seconds:02d}", True, self.timer_text_color)
+        total_value_rect = total_value.get_rect(center=(total_box_rect.centerx, total_box_rect.centery + int(15 * scale_factor)))
         self.screen.blit(total_value, total_value_rect)
 
         # Draw first 5 sec timer on TOP RIGHT (under total time)
-        timer1_box_width = 140
-        timer1_box_height = 70
-        timer1_box_x = board_center_x + 120
-        timer1_box_y = 140
-        timer1_box_rect = pygame.Rect(timer1_box_x, timer1_box_y, timer1_box_width, timer1_box_height)
-        pygame.draw.rect(self.screen, (200, 150, 100), timer1_box_rect, border_radius=10)
-        pygame.draw.rect(self.screen, (0, 0, 0), timer1_box_rect, width=2, border_radius=10)
+        timer1_box_x = board_center_x + right_offset
+        timer1_box_y = total_box_y + total_box_height + int(20 * scale_factor)
+        timer1_box_rect = pygame.Rect(timer1_box_x, timer1_box_y, timer_box_width, timer_box_height)
+        pygame.draw.rect(self.screen, (211, 211, 211), timer1_box_rect, border_radius=8)
+        pygame.draw.rect(self.screen, (0, 0, 0), timer1_box_rect, width=2, border_radius=8)
 
         # Draw only the timer value (5 sec) centered in box
-        timer1_value = self.timer_font_large.render(f"{self.move_time_computer} sec", True, self.timer_text_color)
+        timer1_value = value_font.render(f"{self.move_time_computer}s", True, self.timer_text_color)
         timer1_value_rect = timer1_value.get_rect(center=timer1_box_rect.center)
         self.screen.blit(timer1_value, timer1_value_rect)
 
         # Draw second 5 sec timer on BOTTOM RIGHT (facing top-right timer)
-        timer2_box_width = 140
-        timer2_box_height = 70
-        timer2_box_x = board_center_x + 120
-        timer2_box_y = window_h - 150
-        timer2_box_rect = pygame.Rect(timer2_box_x, timer2_box_y, timer2_box_width, timer2_box_height)
-        pygame.draw.rect(self.screen, (150, 180, 220), timer2_box_rect, border_radius=10)
-        pygame.draw.rect(self.screen, (0, 0, 0), timer2_box_rect, width=2, border_radius=10)
+        timer2_box_x = board_center_x + right_offset
+        timer2_box_y = window_h - bottom_padding
+        timer2_box_rect = pygame.Rect(timer2_box_x, timer2_box_y, timer_box_width, timer_box_height)
+        pygame.draw.rect(self.screen, (211, 211, 211), timer2_box_rect, border_radius=8)
+        pygame.draw.rect(self.screen, (0, 0, 0), timer2_box_rect, width=2, border_radius=8)
 
         # Draw only the timer value (5 sec) centered in box
-        timer2_value = self.timer_font_large.render(f"{self.move_time_player} sec", True, self.timer_text_color)
+        timer2_value = value_font.render(f"{self.move_time_player}s", True, self.timer_text_color)
         timer2_value_rect = timer2_value.get_rect(center=timer2_box_rect.center)
         self.screen.blit(timer2_value, timer2_value_rect)
+
+        # Draw move limit displays below the timer boxes
+        move_limit_font = pygame.font.Font(None, int(26 * scale_factor))
+
+        # Computer move limit (below top-right timer) - aligned with timer box
+        computer_move_text = move_limit_font.render(f"Moves: {self.computer_moves_remaining}/{self.max_moves_per_player}", True, self.timer_text_color)
+        computer_move_rect = computer_move_text.get_rect(topleft=(timer1_box_x, timer1_box_y + timer_box_height + int(8 * scale_factor)))
+        self.screen.blit(computer_move_text, computer_move_rect)
+
+        # Player move limit (below bottom-right timer) - aligned with timer box
+        player_move_text = move_limit_font.render(f"Moves: {self.player_moves_remaining}/{self.max_moves_per_player}", True, self.timer_text_color)
+        player_move_rect = player_move_text.get_rect(topleft=(timer2_box_x, timer2_box_y - move_limit_font.get_height() - int(8 * scale_factor)))
+        self.screen.blit(player_move_text, player_move_rect)
 
     def run(self) -> None:
         """Run the board scene game loop."""

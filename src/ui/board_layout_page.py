@@ -48,7 +48,6 @@ class GameModePage:
 
         self._load_image()
         self._setup_button()
-        self._setup_board_layout_button()
         self._setup_back_button()
         self._setup_next_button()
         self._update_positions()
@@ -194,14 +193,6 @@ class GameModePage:
                 self.belgian_daisy_button_rect.y = button_y
                 self.belgian_daisy_button_text_rect.center = self.belgian_daisy_button_rect.center
 
-        if hasattr(self, 'board_layout_button_rect'):
-            # Board Layout button - top center of the page
-            window_w, window_h = self.screen.get_size()
-            button_x = (window_w - self.board_layout_button_rect.width) // 2
-            button_y = 30  # 30px from top
-            self.board_layout_button_rect.x = button_x
-            self.board_layout_button_rect.y = button_y
-            self.board_layout_button_text_rect.center = self.board_layout_button_rect.center
 
         if hasattr(self, 'next_button_rect'):
             # Next button - top right of the page
@@ -275,24 +266,6 @@ class GameModePage:
         self.belgian_daisy_button_text = font.render("Belgian Daisy", True, self.button_text_color)
         self.belgian_daisy_button_text_rect = self.belgian_daisy_button_text.get_rect(center=self.belgian_daisy_button_rect.center)
 
-    def _setup_board_layout_button(self) -> None:
-        """Setup the 'Board Layout' button at the top of the page."""
-        # Button properties
-        button_width = 200
-        button_height = 50
-
-        # Position at the top center of the page
-        button_x = (WINDOW_W - button_width) // 2  # Horizontally centered
-        button_y = 30  # 30px from top
-
-        # Create Board Layout button rectangle
-        self.board_layout_button_rect = pygame.Rect(button_x, button_y, button_width, button_height)
-        self.current_board_layout_button_color = self.button_color
-
-        # Create button text
-        font = pygame.font.Font(None, 28)
-        self.board_layout_button_text = font.render("Board Layout", True, self.button_text_color)
-        self.board_layout_button_text_rect = self.board_layout_button_text.get_rect(center=self.board_layout_button_rect.center)
 
     def _setup_back_button(self) -> None:
         """Setup the 'Back' button at the top left of the page."""
@@ -416,11 +389,6 @@ class GameModePage:
         else:
             self.current_belgian_daisy_button_color = self.button_color
 
-        # Board Layout button hover
-        if self.board_layout_button_rect.collidepoint(mouse_pos):
-            self.current_board_layout_button_color = self.button_hover_color
-        else:
-            self.current_board_layout_button_color = self.button_color
 
         # Back button hover
         if self.back_button_rect.collidepoint(mouse_pos):
@@ -520,12 +488,6 @@ class GameModePage:
         # Draw button text
         self.screen.blit(self.belgian_daisy_button_text, self.belgian_daisy_button_text_rect)
 
-        # Draw the Board Layout button
-        pygame.draw.rect(self.screen, self.current_board_layout_button_color, self.board_layout_button_rect, border_radius=10)
-        # Draw button border
-        pygame.draw.rect(self.screen, (255, 255, 255), self.board_layout_button_rect, width=3, border_radius=10)
-        # Draw button text
-        self.screen.blit(self.board_layout_button_text, self.board_layout_button_text_rect)
 
         # Draw the Back button
         pygame.draw.rect(self.screen, self.current_back_button_color, self.back_button_rect, border_radius=10)

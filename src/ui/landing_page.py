@@ -12,7 +12,7 @@ from src.constants import (
 
 class LandingPage:
     """
-    Landing page scene that displays the game logo and waits for user input.
+    Landing page scene that displays the game logo and waits for user to start.
     """
 
     def __init__(self, screen: pygame.Surface, clock: pygame.time.Clock):
@@ -64,7 +64,7 @@ class LandingPage:
         self.image_y = (window_h - img_height) // 2
 
     def _setup_text(self) -> None:
-        """Setup the 'Start' button in the middle right part of the screen."""
+        """Se tup the 'Start' button in the middle right part of the screen."""
         # Button properties
         button_width = 200
         button_height = 60
