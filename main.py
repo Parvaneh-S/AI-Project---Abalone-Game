@@ -1,23 +1,19 @@
 """
-Abalone Game - Main Entry Point
+Abalone Game - Move Engine
 
-At this point, only the UI for Abalone game has been implemented, and it has no logic yet.
-This is the main entry point that initializes and runs the game application.
+This is the main entry point for the Move Engine of the Abalone Game.
+The Move Engine is responsible for generating all the possible moves
+for a given board state.
+It will also generate the next board state for each possible move,
+which will be used by the AI to evaluate the best move to make.
 """
-import sys
-from src.ui.game_app import GameApp
+
 
 
 def main() -> None:
-    """Main entry point for the Abalone game."""
-    try:
-        app = GameApp()
-        app.run()
-    except Exception as e:
-        print(f"Error running game: {e}", file=sys.stderr)
-        sys.exit(1)
+    """Main entry point for the Move Engine."""
+    pass
 
-    sys.exit(0)
 
 
 
