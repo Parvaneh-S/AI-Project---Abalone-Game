@@ -3,7 +3,7 @@ Game mode selection page for the Abalone game.
 """
 import pygame
 from typing import Optional
-from src.constants import (
+from src.ui.constants import (
     WINDOW_W, WINDOW_H, FPS,
     LANDING_BG_COLOR
 )
@@ -38,7 +38,7 @@ class GameModePage:
     def _load_background_color(self) -> None:
         """Load the standard image and extract its background color."""
         try:
-            standard_image = pygame.image.load("standard.png")
+            standard_image = pygame.image.load("images/standard.png")
             # Extract background color from the top-left corner pixel
             self.bg_color = standard_image.get_at((0, 0))[:3]  # Get RGB, ignore alpha
         except (FileNotFoundError, pygame.error):
