@@ -8,7 +8,6 @@ from src.ui.constants import (
     LANDING_BG_COLOR
 )
 
-
 class GameModePage:
     """
     Game mode page that displays game mode options.
