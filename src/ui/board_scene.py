@@ -3,7 +3,7 @@ Board scene for the Abalone game.
 """
 import pygame
 from typing import Optional
-from src.constants import FPS, BG_COLOR, CELL_RADIUS, BLACK_COLOR, WHITE_COLOR
+from src.ui.constants import FPS, BG_COLOR, CELL_RADIUS, BLACK_COLOR, WHITE_COLOR
 from src.ui.board_renderer import BoardRenderer
 
 
@@ -12,7 +12,9 @@ class BoardScene:
     Main game board scene.
     """
 
-    def __init__(self, screen: pygame.Surface, clock: pygame.time.Clock, invert_colors: bool = False, board_layout: str = 'standard'):
+    def __init__(self, screen: pygame.Surface, clock: pygame.time.Clock, invert_colors: bool = False, board_layout: str = 'standard',
+                 game_mode: Optional[int] = None, player1_time: Optional[int] = None, player1_move_limit: Optional[int] = None,
+                 player2_time: Optional[int] = None, player2_move_limit: Optional[int] = None):
         """
         Initialize the board scene.
 
@@ -21,16 +23,27 @@ class BoardScene:
             clock: Pygame clock for timing
             invert_colors: If True, swap black and white marble positions
             board_layout: Board layout type ('standard', 'german', or 'belgian')
+            game_mode: Game mode (0=Human vs AI, 1=AI vs AI, 2=Human vs Human)
+            player1_time: Time per move for player 1 (seconds)
+            player1_move_limit: Move limit for player 1
+            player2_time: Time per move for player 2 (seconds)
+            player2_move_limit: Move limit for player 2
         """
         self.screen = screen
         self.clock = clock
         self.invert_colors = invert_colors
         self.board_layout = board_layout
+        self.game_mode = game_mode if game_mode is not None else 0
         self.running = True
         self.go_back = False
 
-        # Turn tracking (True = human turn, False = computer turn)
-        self.is_human_turn = True
+        # Set player color first (needed before other initializations)
+        self.player_color = BLACK_COLOR if not invert_colors else WHITE_COLOR  # Player's chosen color
+
+        # Turn tracking - black always starts first in Abalone
+        # is_human_turn should reflect if it's the human player's turn, not just starting position
+        self.current_turn_color = BLACK_COLOR  # Black always starts first
+        self.is_human_turn = (self.player_color == BLACK_COLOR)  # True if human is playing black
 
         # Drag and drop state
         self.dragging = False
@@ -38,7 +51,6 @@ class BoardScene:
         self.drag_offset = (0, 0)  # Offset from marble center to mouse position
         self.mouse_down_pos = None  # Position where mouse button was pressed (for click vs drag detection)
         self._marble_before_drag = None  # Selection state before the current mouse-down
-        self.player_color = BLACK_COLOR if not invert_colors else WHITE_COLOR  # Player's chosen color
 
         # Game state management
         self.game_paused = False  # Whether the game is currently paused
@@ -76,17 +88,24 @@ class BoardScene:
         self.player_score = 0
         self.opponent_score = 0
 
-        # Timer variables
-        self.total_time = 15 * 60  # 15 minutes in seconds
-        self.move_time_computer = 5  # 5 seconds per move
-        self.move_time_player = 5
+        # Timer variables - set from player configuration
+        self.move_time_player = player1_time if player1_time is not None else 5  # Time per move in seconds
+        self.move_time_computer = player2_time if player2_time is not None else 5  # Time per move for opponent
+
+        # Store original move times for reference during timer updates
+        self._original_move_time_player = self.move_time_player
+        self._original_move_time_computer = self.move_time_computer
+
+        self.total_time = 15 * 60  # 15 minutes in seconds (legacy)
         self.is_game_timer_running = False
         self.start_ticks = 0
 
-        # Move limit variables (set by game configuration)
-        self.max_moves_per_player = 40  # Default move limit per player
-        self.player_moves_remaining = 40  # Player's remaining moves
-        self.computer_moves_remaining = 40  # Computer's remaining moves
+        # Move limit variables - set from player configuration
+        self.player1_move_limit = player1_move_limit if player1_move_limit is not None else 40
+        self.player2_move_limit = player2_move_limit if player2_move_limit is not None else 40
+        self.max_moves_per_player = self.player1_move_limit  # For compatibility
+        self.player_moves_remaining = self.player1_move_limit
+        self.computer_moves_remaining = self.player2_move_limit
 
         self._setup_timers()
 
@@ -103,22 +122,54 @@ class BoardScene:
         self.total_time_box_color = (180, 140, 100)  # Tan/brown color
 
 
+    def _reset_timer_for_next_turn(self) -> None:
+        """Reset ONLY the per-move timer when switching to next player's turn."""
+        # Reset ONLY the per-move timer, NOT the total game timer
+        self.move_start_ticks = pygame.time.get_ticks()
+        self.is_game_timer_running = True
+
     def _update_timers(self) -> None:
         """Update game timers."""
         if not self.is_game_timer_running:
             return
 
-        elapsed = (pygame.time.get_ticks() - self.start_ticks) // 1000
-        self.total_time = max(0, 15 * 60 - elapsed)
+        # Total game time - never resets, counts continuously from game start
+        total_elapsed = (pygame.time.get_ticks() - self.start_ticks) // 1000
+        self.total_time = max(0, 15 * 60 - total_elapsed)
 
-        # Update move timer for current player
-        move_elapsed = elapsed % 10
-        if move_elapsed < 5:
-            self.move_time_player = max(0, 5 - move_elapsed)
-            self.move_time_computer = 5
+        # Per-move timer - resets for each player's turn
+        move_elapsed = (pygame.time.get_ticks() - self.move_start_ticks) // 1000
+
+        # Store the selected times (time per move, not move limits)
+        selected_time_black = 5  # Default
+        selected_time_white = 5  # Default
+
+        # Use the move_time values that were set from configuration
+        # Determine which player is black and which is white
+        if self.player_color == BLACK_COLOR:
+            # Human is black, so opponent is white
+            selected_time_black = self._original_move_time_player if hasattr(self, '_original_move_time_player') else 5
+            selected_time_white = self._original_move_time_computer if hasattr(self, '_original_move_time_computer') else 5
         else:
-            self.move_time_computer = max(0, 10 - move_elapsed)
-            self.move_time_player = 5
+            # Human is white, so opponent is black
+            selected_time_black = self._original_move_time_computer if hasattr(self, '_original_move_time_computer') else 5
+            selected_time_white = self._original_move_time_player if hasattr(self, '_original_move_time_player') else 5
+
+        # Update move timer based on whose turn it is (by color)
+        if self.current_turn_color == BLACK_COLOR:
+            # Black's turn - show black's time
+            current_time = max(0, selected_time_black - move_elapsed)
+            if self.player_color == BLACK_COLOR:
+                self.move_time_player = current_time
+            else:
+                self.move_time_computer = current_time
+        else:
+            # White's turn - show white's time
+            current_time = max(0, selected_time_white - move_elapsed)
+            if self.player_color == WHITE_COLOR:
+                self.move_time_player = current_time
+            else:
+                self.move_time_computer = current_time
 
     def _setup_back_button(self) -> None:
         """Setup the back button in the top-left corner."""
@@ -212,12 +263,12 @@ class BoardScene:
         self.undo_icon_image = None
         self.undo_icon_scaled = None
         try:
-            self.undo_icon_image = pygame.image.load("undo.png")
+            self.undo_icon_image = pygame.image.load("images/undo.png")
             # Scale to fit in circular button
             icon_size = 28  # Icon size for button
             self.undo_icon_scaled = pygame.transform.scale(self.undo_icon_image, (icon_size, icon_size))
         except (FileNotFoundError, pygame.error) as e:
-            print(f"Warning: Could not load undo.png: {e}")
+            print(f"Warning: Could not load images/undo.png: {e}")
 
         # Setup undo text
         self.undo_font = pygame.font.Font(None, 28)
@@ -363,12 +414,12 @@ class BoardScene:
         self.reset_icon_image = None
         self.reset_icon_scaled = None
         try:
-            self.reset_icon_image = pygame.image.load("reset_icon.png")
+            self.reset_icon_image = pygame.image.load("images/reset_icon.png")
             # Scale to fit within button (slightly smaller than button size for padding)
             icon_size = int(button_size * 0.7)
             self.reset_icon_scaled = pygame.transform.scale(self.reset_icon_image, (icon_size, icon_size))
         except (FileNotFoundError, pygame.error) as e:
-            print(f"Warning: Could not load reset_icon.png: {e}")
+            print(f"Warning: Could not load images/reset_icon.png: {e}")
             # Will fall back to drawing the icon programmatically
 
         # Create button rectangles (circular)
@@ -572,7 +623,8 @@ class BoardScene:
                     continue
 
                 # Check if a destination ball was clicked to move the selected marble
-                if self.is_human_turn and self.game_started and not self.game_paused and self.selected_marble:
+                # Allow move if it's the current player's marble (matching current turn color)
+                if self.game_started and not self.game_paused and self.selected_marble:
                     clicked_cell = self._get_cell_at_position(event.pos)
                     if clicked_cell and clicked_cell in self._get_valid_destinations(self.selected_marble):
                         # Move the selected marble to the clicked destination
@@ -585,21 +637,36 @@ class BoardScene:
                         self.marble_positions[clicked_cell] = self.marble_positions[self.selected_marble]
                         del self.marble_positions[self.selected_marble]
 
-                        self.player_moves_remaining -= 1
-                        print(f"Player move made! Remaining moves: {self.player_moves_remaining}")
+                        # Decrement moves for the player whose color moved
+                        if marble_color == self.player_color:
+                            self.player_moves_remaining -= 1
+                            print(f"Player move made! Remaining moves: {self.player_moves_remaining}")
+                            if self.player_moves_remaining <= 0:
+                                print("Player has reached move limit!")
+                                self.game_paused = True
+                                self.show_pause_modal = True
+                        else:
+                            self.computer_moves_remaining -= 1
+                            print(f"Opponent move made! Remaining moves: {self.computer_moves_remaining}")
+                            if self.computer_moves_remaining <= 0:
+                                print("Opponent has reached move limit!")
+                                self.game_paused = True
+                                self.show_pause_modal = True
 
-                        if self.player_moves_remaining <= 0:
-                            print("Player has reached move limit!")
-                            self.game_paused = True
-                            self.show_pause_modal = True
+                        # Switch turns to opponent
+                        self.current_turn_color = WHITE_COLOR if self.current_turn_color == BLACK_COLOR else BLACK_COLOR
+
+                        # Reset timer for next player's turn
+                        self._reset_timer_for_next_turn()
 
                         self.selected_marble = None
                         continue
 
                 # Check if a marble was clicked for dragging (only if game is started and not paused)
-                if self.is_human_turn and self.game_started and not self.game_paused:
+                # Only allow dragging marbles that match the current turn's color
+                if self.game_started and not self.game_paused:
                     marble_at_pos = self._get_marble_at_position(event.pos)
-                    if marble_at_pos and self.marble_positions.get(marble_at_pos) == self.player_color:
+                    if marble_at_pos and self.marble_positions.get(marble_at_pos) == self.current_turn_color:
                         # Always start dragging; deselection is resolved on MOUSEBUTTONUP
                         self.mouse_down_pos = event.pos
                         self._marble_before_drag = self.selected_marble  # remember prior selection
@@ -647,16 +714,27 @@ class BoardScene:
                         self.marble_positions[drop_cell] = self.marble_positions[self.dragged_marble]
                         del self.marble_positions[self.dragged_marble]
 
-                        # Decrement player's move limit
-                        self.player_moves_remaining -= 1
-                        print(f"Player move made! Remaining moves: {self.player_moves_remaining}")
+                        # Decrement moves for the player whose color moved
+                        if marble_color == self.player_color:
+                            self.player_moves_remaining -= 1
+                            print(f"Player move made! Remaining moves: {self.player_moves_remaining}")
+                            if self.player_moves_remaining <= 0:
+                                print("Player has reached move limit!")
+                                self.game_paused = True
+                                self.show_pause_modal = True
+                        else:
+                            self.computer_moves_remaining -= 1
+                            print(f"Opponent move made! Remaining moves: {self.computer_moves_remaining}")
+                            if self.computer_moves_remaining <= 0:
+                                print("Opponent has reached move limit!")
+                                self.game_paused = True
+                                self.show_pause_modal = True
 
-                        # Check if player reached move limit
-                        if self.player_moves_remaining <= 0:
-                            print("Player has reached move limit!")
-                            self.game_paused = True
-                            self.show_pause_modal = True
-                            # TODO: Show game over message or end game
+                        # Switch turns to opponent
+                        self.current_turn_color = WHITE_COLOR if self.current_turn_color == BLACK_COLOR else BLACK_COLOR
+
+                        # Reset timer for next player's turn
+                        self._reset_timer_for_next_turn()
 
                         # Clear selection after a successful move
                         self.selected_marble = None
@@ -693,14 +771,16 @@ class BoardScene:
             self.game_started = True
             self.game_paused = False
             self.is_game_timer_running = True
-            self.start_ticks = pygame.time.get_ticks()
+            self.start_ticks = pygame.time.get_ticks()  # Total game time starts here (never resets)
+            self.move_start_ticks = pygame.time.get_ticks()  # Per-move timer starts here (will reset per turn)
             print("Game started!")
         elif self.game_paused:
             # Resume if paused
             self.game_paused = False
             self.show_pause_modal = False
             self.is_game_timer_running = True
-            self.start_ticks = pygame.time.get_ticks()
+            # Don't reset start_ticks - total game time keeps running
+            self.move_start_ticks = pygame.time.get_ticks()  # Reset per-move timer when resuming
             print("Game resumed!")
         else:
             print("Game is already running!")
@@ -1224,7 +1304,7 @@ class BoardScene:
     def _draw_board_and_marbles(self) -> None:
         """Draw the board hexagon and all marbles."""
         # Draw the hexagonal board
-        from src.constants import CELL_MARGIN, RIM_WIDTH, BORDER_COLOR, BOARD_FILL, EMPTY_COLOR
+        from src.ui.constants import CELL_MARGIN, RIM_WIDTH, BORDER_COLOR, BOARD_FILL, EMPTY_COLOR
 
         # Inner hex should fully contain all circles (radius + margin)
         inner_hex = self.board_renderer._hex_polygon_around_cells(extra=CELL_MARGIN)
@@ -1341,7 +1421,7 @@ class BoardScene:
 
     def _draw_opponent_score_display(self) -> None:
         """Draw the opponent score display above the board."""
-        from src.constants import CELL_MARGIN, RIM_WIDTH, CELL_RADIUS
+        from src.ui.constants import CELL_MARGIN, RIM_WIDTH, CELL_RADIUS
         import math
 
         # Calculate the top edge of the hexagon board
@@ -1395,7 +1475,7 @@ class BoardScene:
 
     def _draw_player_score_display(self) -> None:
         """Draw the player score display below the board."""
-        from src.constants import CELL_MARGIN, RIM_WIDTH, CELL_RADIUS
+        from src.ui.constants import CELL_MARGIN, RIM_WIDTH, CELL_RADIUS
         import math
 
         # Calculate the bottom edge of the hexagon board
@@ -1599,12 +1679,12 @@ class BoardScene:
         move_limit_font = pygame.font.Font(None, int(26 * scale_factor))
 
         # Computer move limit (below top-right timer) - aligned with timer box
-        computer_move_text = move_limit_font.render(f"Moves: {self.computer_moves_remaining}/{self.max_moves_per_player}", True, self.timer_text_color)
+        computer_move_text = move_limit_font.render(f"Moves: {self.computer_moves_remaining}/{self.player2_move_limit}", True, self.timer_text_color)
         computer_move_rect = computer_move_text.get_rect(topleft=(timer1_box_x, timer1_box_y + timer_box_height + int(8 * scale_factor)))
         self.screen.blit(computer_move_text, computer_move_rect)
 
         # Player move limit (below bottom-right timer) - aligned with timer box
-        player_move_text = move_limit_font.render(f"Moves: {self.player_moves_remaining}/{self.max_moves_per_player}", True, self.timer_text_color)
+        player_move_text = move_limit_font.render(f"Moves: {self.player_moves_remaining}/{self.player1_move_limit}", True, self.timer_text_color)
         player_move_rect = player_move_text.get_rect(topleft=(timer2_box_x, timer2_box_y - move_limit_font.get_height() - int(8 * scale_factor)))
         self.screen.blit(player_move_text, player_move_rect)
 
