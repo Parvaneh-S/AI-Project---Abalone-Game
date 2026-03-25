@@ -3,8 +3,8 @@ Board renderer for the Abalone game.
 """
 import math
 from typing import List, Tuple, Dict
-from src.constants import (
-    CELL_RADIUS, CELL_MARGIN, RIM_WIDTH, DX, DY,
+from src.ui.constants import (
+    CELL_RADIUS, DX, DY,
     ROW_COUNTS, WHITE_COLOR, BLACK_COLOR
 )
 

@@ -3,7 +3,7 @@ Landing page scene for the Abalone game.
 """
 import pygame
 from typing import Optional
-from src.constants import (
+from src.ui.constants import (
     WINDOW_W, WINDOW_H, FPS,
     LANDING_PAGE_IMAGES,
     LANDING_BG_COLOR
@@ -64,7 +64,7 @@ class LandingPage:
         self.image_y = (window_h - img_height) // 2
 
     def _setup_text(self) -> None:
-        """Se tup the 'Start' button in the middle right part of the screen."""
+        """Setup the 'Start' button in the middle right part of the screen."""
         # Button properties
         button_width = 200
         button_height = 60
