@@ -14,7 +14,7 @@ FPS = 60
 # Colors
 # ----------------------------
 BORDER_COLOR = (166, 112, 74)     # brown
-BOARD_FILL = (239, 225, 196)      # beige
+BOARD_FILL = (180, 150, 110)      # dark brown/tan
 BG_COLOR = (255, 255, 255)        # outside
 
 EMPTY_COLOR = (145, 145, 145)     # gray
@@ -46,8 +46,8 @@ CELL_MARGIN = 8       # Proportionally increased
 # ----------------------------
 # Landing Page
 # ----------------------------
-LANDING_PAGE_IMAGES = ["landing_page_icon.png", "landing_logo.png", "icon.png", "icon.jpg"]
+LANDING_PAGE_IMAGES = ["images/landing_page_icon.png", "images/landing_logo.png", "images/icon.png", "images/icon.jpg"]
 LANDING_TEXT_COLOR = (255, 255, 255)
-LANDING_BG_COLOR = (245, 235, 220)  # Cream color matching the landing page icon background
+LANDING_BG_COLOR = (180, 150, 110)  # Dark brown/tan
 LANDING_TEXT_BG_COLOR = (0, 0, 0, 180)
 
