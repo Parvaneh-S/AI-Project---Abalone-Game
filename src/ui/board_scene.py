@@ -59,6 +59,10 @@ class BoardScene:
         self.show_pause_modal = False  # Whether to show pause modal
         self.show_stop_modal = False  # Whether to show stop confirmation modal
 
+        # Timeout (move time limit exceeded) state
+        self.show_timeout_modal = False  # Whether to show the timeout game-over modal
+        self.timeout_loser_color = None  # BLACK_COLOR or WHITE_COLOR – who ran out of time
+
         # Button tooltip tracking
         self.tooltip_text = None  # Current tooltip text to display
         self.tooltip_position = (0, 0)  # Tooltip position
@@ -163,6 +167,9 @@ class BoardScene:
                 self.move_time_player = current_time
             else:
                 self.move_time_computer = current_time
+            # Trigger timeout if time ran out
+            if current_time == 0 and not self.show_timeout_modal:
+                self._trigger_move_timeout(BLACK_COLOR)
         else:
             # White's turn - show white's time
             current_time = max(0, selected_time_white - move_elapsed)
@@ -170,6 +177,21 @@ class BoardScene:
                 self.move_time_player = current_time
             else:
                 self.move_time_computer = current_time
+            # Trigger timeout if time ran out
+            if current_time == 0 and not self.show_timeout_modal:
+                self._trigger_move_timeout(WHITE_COLOR)
+
+    def _trigger_move_timeout(self, loser_color) -> None:
+        """Stop the game because a player exceeded their per-move time limit.
+
+        Args:
+            loser_color: The color constant (BLACK_COLOR / WHITE_COLOR) of the player who ran out of time.
+        """
+        print(f"Move timeout! {'Black' if loser_color == BLACK_COLOR else 'White'} ran out of time.")
+        self.timeout_loser_color = loser_color
+        self.show_timeout_modal = True
+        self.game_paused = True
+        self.is_game_timer_running = False
 
     def _setup_back_button(self) -> None:
         """Setup the back button in the top-left corner."""
@@ -587,6 +609,13 @@ class BoardScene:
                 # Window was resized, update positions
                 self._update_positions()
             if event.type == pygame.MOUSEBUTTONDOWN:
+                # If timeout modal is showing, handle modal button clicks and block everything else
+                if self.show_timeout_modal:
+                    self._handle_timeout_modal_click(event.pos)
+                    if not self.running:
+                        return False
+                    continue
+
                 # If pause modal is showing, handle modal button clicks
                 if self.show_pause_modal:
                     self._handle_pause_modal_click(event.pos)
@@ -828,6 +857,87 @@ class BoardScene:
             # User cancelled - just close the modal
             self.show_stop_modal = False
             print("Stop cancelled")
+
+    def _get_timeout_modal_geometry(self) -> dict:
+        """Get timeout game-over modal dimensions and button position."""
+        window_w, window_h = self.screen.get_size()
+
+        modal_width = 460
+        modal_height = 260
+        modal_x = (window_w - modal_width) // 2
+        modal_y = (window_h - modal_height) // 2
+
+        button_width = 160
+        button_height = 50
+        button_x = modal_x + (modal_width - button_width) // 2
+        button_y = modal_y + modal_height - 75
+
+        return {
+            'modal_x': modal_x,
+            'modal_y': modal_y,
+            'modal_width': modal_width,
+            'modal_height': modal_height,
+            'ok_button': pygame.Rect(button_x, button_y, button_width, button_height),
+        }
+
+    def _handle_timeout_modal_click(self, pos: tuple) -> None:
+        """Handle clicks on the timeout game-over modal."""
+        geom = self._get_timeout_modal_geometry()
+        if geom['ok_button'].collidepoint(pos):
+            # Go back to menu
+            self.show_timeout_modal = False
+            self.go_back = True
+            self.running = False
+
+    def _draw_timeout_modal(self) -> None:
+        """Draw the move-timeout game-over modal."""
+        window_w, window_h = self.screen.get_size()
+        geom = self._get_timeout_modal_geometry()
+
+        # Semi-transparent overlay
+        overlay = pygame.Surface((window_w, window_h), pygame.SRCALPHA)
+        overlay.fill((0, 0, 0, 160))
+        self.screen.blit(overlay, (0, 0))
+
+        # Modal background
+        modal_rect = pygame.Rect(geom['modal_x'], geom['modal_y'], geom['modal_width'], geom['modal_height'])
+        pygame.draw.rect(self.screen, (240, 240, 240), modal_rect, border_radius=15)
+        pygame.draw.rect(self.screen, (180, 60, 60), modal_rect, width=4, border_radius=15)
+
+        # Title: "Game Over"
+        title_font = pygame.font.Font(None, 60)
+        title_text = title_font.render("Game Over!", True, (180, 60, 60))
+        title_rect = title_text.get_rect(center=(geom['modal_x'] + geom['modal_width'] // 2,
+                                                  geom['modal_y'] + 60))
+        self.screen.blit(title_text, title_rect)
+
+        # Determine loser name
+        if self.timeout_loser_color == BLACK_COLOR:
+            loser_name = "Black"
+        else:
+            loser_name = "White"
+
+        # Message
+        msg_font = pygame.font.Font(None, 34)
+        line1 = msg_font.render("Time's up! No move was made in time.", True, (50, 50, 50))
+        line2 = msg_font.render(f"{loser_name} player has lost!", True, (50, 50, 50))
+        line1_rect = line1.get_rect(center=(geom['modal_x'] + geom['modal_width'] // 2,
+                                             geom['modal_y'] + 130))
+        line2_rect = line2.get_rect(center=(geom['modal_x'] + geom['modal_width'] // 2,
+                                             geom['modal_y'] + 165))
+        self.screen.blit(line1, line1_rect)
+        self.screen.blit(line2, line2_rect)
+
+        # OK button
+        mouse_pos = pygame.mouse.get_pos()
+        ok_color = (184, 202, 176) if geom['ok_button'].collidepoint(mouse_pos) else (164, 182, 156)
+        pygame.draw.rect(self.screen, ok_color, geom['ok_button'], border_radius=10)
+        pygame.draw.rect(self.screen, (255, 255, 255), geom['ok_button'], width=2, border_radius=10)
+
+        ok_font = pygame.font.Font(None, 38)
+        ok_text = ok_font.render("OK", True, (255, 255, 255))
+        ok_text_rect = ok_text.get_rect(center=geom['ok_button'].center)
+        self.screen.blit(ok_text, ok_text_rect)
 
     def _reset_game(self) -> None:
         """Reset the game board to initial state."""
@@ -1169,6 +1279,10 @@ class BoardScene:
         # Draw stop confirmation modal if showing
         if self.show_stop_modal:
             self._draw_stop_modal()
+
+        # Draw timeout game-over modal if showing
+        if self.show_timeout_modal:
+            self._draw_timeout_modal()
 
         pygame.display.flip()
 
