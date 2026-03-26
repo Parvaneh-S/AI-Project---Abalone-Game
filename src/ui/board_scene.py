@@ -10,6 +10,7 @@ from src.move_engine import (
     Move, Board as EngineBoard, Player as EnginePlayer, CELLS as ENGINE_CELLS,
     DIRS, cell_add, group_cells, CANONICAL_DIRS, OPPOSITE,
 )
+from src.ai_agent import AIAgent
 
 
 class BoardScene:
@@ -78,6 +79,18 @@ class BoardScene:
         self._legal_moves_cache: List[Tuple[Move, EngineBoard]] = []
         # Maps destination (row, col) → (Move, EngineBoard) for the current selection
         self._dest_to_move: Dict[Tuple[int, int], Tuple[Move, EngineBoard]] = {}
+
+        # ── AI agent setup (Human vs AI mode) ──────────────────────────────
+        self.ai_agent: Optional[AIAgent] = None
+        self._ai_thinking = False        # True while the delay is ticking
+        self._ai_think_start: int = 0    # pygame tick when the "thinking" began
+        self._ai_think_delay: int = 600  # milliseconds to pause before AI plays
+
+        if self.game_mode == 0:  # Human vs AI
+            # The AI controls whichever colour the human did NOT pick
+            ai_color = WHITE_COLOR if self.player_color == BLACK_COLOR else BLACK_COLOR
+            ai_player_char = 'b' if ai_color == BLACK_COLOR else 'w'
+            self.ai_agent = AIAgent(ai_player_char)
 
 
         self._setup_back_button()
@@ -478,6 +491,54 @@ class BoardScene:
         engine_board = self._board_to_engine_state()
         current_player = self._color_to_player(self.current_turn_color)
         self._legal_moves_cache = generate_moves(current_player, engine_board)
+
+    # ------------------------------------------------------------------
+    # AI turn helper
+    # ------------------------------------------------------------------
+
+    def _maybe_ai_move(self) -> None:
+        """If it is the AI's turn, start a short "thinking" delay and then play.
+
+        Called once per frame from the main ``run`` loop.  The delay gives a
+        visible pause so the human player can see the transition.
+        """
+        if self.ai_agent is None:
+            return
+        if not self.game_started or self.game_paused:
+            return
+        if self.show_pause_modal or self.show_stop_modal or self.show_timeout_modal:
+            return
+
+        # Only act when the current turn colour is the AI's colour
+        is_ai_turn = (self.current_turn_color != self.player_color)
+        if not is_ai_turn:
+            self._ai_thinking = False
+            return
+
+        # Start the "thinking" timer on the first frame of the AI's turn
+        if not self._ai_thinking:
+            self._ai_thinking = True
+            self._ai_think_start = pygame.time.get_ticks()
+            return  # wait for the delay to elapse
+
+        # Wait until the delay has elapsed
+        elapsed = pygame.time.get_ticks() - self._ai_think_start
+        if elapsed < self._ai_think_delay:
+            return
+
+        # --- Execute AI move ---
+        engine_board = self._board_to_engine_state()
+        result = self.ai_agent.select_move(engine_board, self._legal_moves_cache)
+        if result is None:
+            # No legal moves – should not normally happen
+            print("AI has no legal moves!")
+            self._ai_thinking = False
+            return
+
+        move, new_board = result
+        print(f"AI plays: {move.notation()}")
+        self._apply_engine_move(move, new_board)
+        self._ai_thinking = False
 
     # ------------------------------------------------------------------
     # Multi-marble selection helpers
@@ -1151,6 +1212,7 @@ class BoardScene:
             self._dest_to_move = {}
             self._legal_moves_cache = []
             self.current_turn_color = BLACK_COLOR
+            self._ai_thinking = False
             if self.game_started:
                 self._recompute_legal_moves()
             print("Game reset to initial state!")
@@ -2010,6 +2072,7 @@ class BoardScene:
         while self.running:
             self.running = self._handle_events()
             self._update_timers()
+            self._maybe_ai_move()
             self._draw()
             self.clock.tick(FPS)
 
