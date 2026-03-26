@@ -2,10 +2,9 @@
 Game application manager.
 """
 import pygame
-from src.constants import WINDOW_W, WINDOW_H
+from src.ui.constants import WINDOW_W, WINDOW_H
 from src.ui.landing_page import LandingPage
-from src.ui.game_mode_page import GameModePage
-from src.ui.board_layout_page import GameModePage as BoardLayoutPage
+from src.ui.board_layout_page import GameModePage
 from src.ui.board_scene import BoardScene
 
 class GameApp:
@@ -26,11 +25,11 @@ class GameApp:
         """Set the window icon."""
 
         try:
-            icon = pygame.image.load("icon.png")
+            icon = pygame.image.load("images/icon.png")
             pygame.display.set_icon(icon)
         except (FileNotFoundError, pygame.error):
             try:
-                icon = pygame.image.load("icon.jpg")
+                icon = pygame.image.load("images/icon.jpg")
                 pygame.display.set_icon(icon)
             except (FileNotFoundError, pygame.error):
                 pass  # No icon available
@@ -48,50 +47,48 @@ class GameApp:
 
             # Loop to allow going back from subsequent pages
             while True:
-                # Show game mode page
-                game_mode_page = GameModePage(self.screen, self.clock)
-                game_mode_result = game_mode_page.run()
+                # Show unified game configuration page (game mode + board layout + color selection)
+                config_page = GameModePage(self.screen, self.clock)
+                config_result = config_page.run()
 
                 # Check if user wants to go back to landing page
-                if game_mode_page.back_requested:
+                if config_page.back_requested:
                     break  # Break to outer loop to show landing page again
 
-                if not game_mode_result:
+                if not config_result:
                     self.quit()
                     return
 
-                # Loop to allow going back from board scene to board layout page
-                while True:
-                    # Show board layout page
-                    board_layout_page = BoardLayoutPage(self.screen, self.clock)
-                    board_layout_result = board_layout_page.run()
+                # Show board scene with the selected configuration
+                board_layout = config_page.selected_board if config_page.selected_board else 'standard'
+                if board_layout == 'standard':
+                    invert_colors = config_page.selected_color == 'white'
+                else:
+                    # For Belgian Daisy and German Daisy, always use black configuration
+                    invert_colors = False
 
-                    # Check if user wants to go back to game mode page
-                    if board_layout_page.back_requested:
-                        break  # Break to show game mode page again
+                board_scene = BoardScene(
+                    self.screen,
+                    self.clock,
+                    invert_colors=invert_colors,
+                    board_layout=board_layout,
+                    game_mode=config_page.selected_mode,
+                    player1_time=config_page.player1_time,
+                    player1_move_limit=config_page.player1_move_limit,
+                    player2_time=config_page.player2_time,
+                    player2_move_limit=config_page.player2_move_limit
+                )
+                board_scene.run()
 
-                    if not board_layout_result:
-                        self.quit()
-                        return
-
-                    # Show board scene with inverted colors if white was selected
-                    # For Belgian Daisy and German Daisy, color selection doesn't matter - always use black configuration
-                    board_layout = board_layout_page.selected_board if board_layout_page.selected_board else 'standard'
-                    if board_layout == 'standard':
-                        invert_colors = board_layout_page.selected_color == 'white'
-                    else:
-                        # For Belgian Daisy and German Daisy, always use black configuration
-                        invert_colors = False
-                    board_scene = BoardScene(self.screen, self.clock, invert_colors=invert_colors, board_layout=board_layout)
-                    board_scene.run()
-
-                    # Check if user wants to go back
-                    if not board_scene.go_back:
-                        # User quit the application
-                        self.quit()
-                        return
+                # Check if user wants to go back
+                if not board_scene.go_back:
+                    # User quit the application
+                    self.quit()
+                    return
 
     def quit(self) -> None:
         """Clean up and quit the application."""
         pygame.quit()
+
+
 

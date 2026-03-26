@@ -1,38 +1,48 @@
-# Abalone AI Game
+# Abalone State Space Generator
 
-A Python-based implementation of the classic **Abalone** board game with a graphical user interface.
+This program generates all legal move notations and their resulting board configurations for any given Abalone board state.
 
-## What is this program?
-
-This program is a work-in-progress implementation of the Abalone board game. **At this stage, only the UI has been implemented — game logic and AI are not yet available.**
-
-The interface currently includes:
-- A landing page and game mode selection screen
-- An interactive hexagonal board rendered with multiple starting layouts (Standard, German Daisy, Belgian Daisy)
-- Configuration options for move limits and time limits
-- A game screen layout with placeholders for move history and game information
+---
 
 ## Requirements
 
-- **Python 3.10 or higher**
-- **pygame 2.5 or higher**
+- Python 3.10 or higher (no third-party packages required)
 
-Install the required library with:
+---
 
-```bash
-pip install pygame>=2.5
-```
 
 ## How to Run
 
-Navigate to the project folder and run:
+Place move_engine.py in the same directory with your input file, then run from a terminal:
 
 ```bash
-python main.py
+python move_engine.py <path/to/TestX.input>
 ```
 
-or
+### Examples
 
+**Windows (PowerShell / Command Prompt):**
+```powershell
+python move_engine.py Test1.input
+```
+```powershell
+python move_engine.py C:\Users\you\inputs\Test2.input
+```
+
+**macOS / Linux:**
 ```bash
-py main.py
+python3 move_engine.py Test1.input
 ```
+```bash
+python3 move_engine.py /home/you/inputs/Test2.input
+```
+
+The program prints a short summary to the console and writes the two output files:
+```
+Player to move : b
+Moves generated: 44
+Move file      : C:\path\to\Test1.move
+Board file     : C:\path\to\Test1.board
+```
+
+

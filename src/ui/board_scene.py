@@ -1,10 +1,17 @@
 """
 Board scene for the Abalone game.
 """
+import math
 import pygame
-from typing import Optional
-from src.constants import FPS, BG_COLOR, CELL_RADIUS, BLACK_COLOR, WHITE_COLOR
+from typing import Optional, List, Dict, Tuple, Set
+from src.ui.constants import FPS, BG_COLOR, CELL_RADIUS, BLACK_COLOR, WHITE_COLOR
 from src.ui.board_renderer import BoardRenderer
+from src.move_engine import (
+    generate_moves, notation_to_axial, axial_to_notation,
+    Move, Board as EngineBoard, Player as EnginePlayer, CELLS as ENGINE_CELLS,
+    DIRS, cell_add, group_cells, CANONICAL_DIRS, OPPOSITE,
+)
+from src.ai_agent import AIAgent
 
 
 class BoardScene:
@@ -12,7 +19,9 @@ class BoardScene:
     Main game board scene.
     """
 
-    def __init__(self, screen: pygame.Surface, clock: pygame.time.Clock, invert_colors: bool = False, board_layout: str = 'standard'):
+    def __init__(self, screen: pygame.Surface, clock: pygame.time.Clock, invert_colors: bool = False, board_layout: str = 'standard',
+                 game_mode: Optional[int] = None, player1_time: Optional[int] = None, player1_move_limit: Optional[int] = None,
+                 player2_time: Optional[int] = None, player2_move_limit: Optional[int] = None):
         """
         Initialize the board scene.
 
@@ -21,16 +30,27 @@ class BoardScene:
             clock: Pygame clock for timing
             invert_colors: If True, swap black and white marble positions
             board_layout: Board layout type ('standard', 'german', or 'belgian')
+            game_mode: Game mode (0=Human vs AI, 1=AI vs AI, 2=Human vs Human)
+            player1_time: Time per move for player 1 (seconds)
+            player1_move_limit: Move limit for player 1
+            player2_time: Time per move for player 2 (seconds)
+            player2_move_limit: Move limit for player 2
         """
         self.screen = screen
         self.clock = clock
         self.invert_colors = invert_colors
         self.board_layout = board_layout
+        self.game_mode = game_mode if game_mode is not None else 0
         self.running = True
         self.go_back = False
 
-        # Turn tracking (True = human turn, False = computer turn)
-        self.is_human_turn = True
+        # Set player color first (needed before other initializations)
+        self.player_color = BLACK_COLOR if not invert_colors else WHITE_COLOR  # Player's chosen color
+
+        # Turn tracking - black always starts first in Abalone
+        # is_human_turn should reflect if it's the human player's turn, not just starting position
+        self.current_turn_color = BLACK_COLOR  # Black always starts first
+        self.is_human_turn = (self.player_color == BLACK_COLOR)  # True if human is playing black
 
         # Drag and drop state
         self.dragging = False
@@ -38,7 +58,6 @@ class BoardScene:
         self.drag_offset = (0, 0)  # Offset from marble center to mouse position
         self.mouse_down_pos = None  # Position where mouse button was pressed (for click vs drag detection)
         self._marble_before_drag = None  # Selection state before the current mouse-down
-        self.player_color = BLACK_COLOR if not invert_colors else WHITE_COLOR  # Player's chosen color
 
         # Game state management
         self.game_paused = False  # Whether the game is currently paused
@@ -47,11 +66,42 @@ class BoardScene:
         self.show_pause_modal = False  # Whether to show pause modal
         self.show_stop_modal = False  # Whether to show stop confirmation modal
 
+        # Timeout (move time limit exceeded) state
+        self.show_timeout_modal = False  # Whether to show the timeout game-over modal
+        self.timeout_loser_color = None  # BLACK_COLOR or WHITE_COLOR – who ran out of time
+
+        # Win condition state (score reaches 6)
+        self.show_win_modal = False  # Whether to show the win game-over modal
+        self.winner_color = None  # BLACK_COLOR or WHITE_COLOR – who reached 6 points
+
         # Button tooltip tracking
         self.tooltip_text = None  # Current tooltip text to display
         self.tooltip_position = (0, 0)  # Tooltip position
-        # Selection state - persistent selection that shows valid moves
-        self.selected_marble = None  # (row, col) of the currently selected marble
+
+        # Selection state - supports 1, 2, or 3 marble group selection
+        self.selected_marbles: List[Tuple[int, int]] = []  # list of (row, col)
+        # Cached legal moves from move_engine for the current board state & turn
+        self._legal_moves_cache: List[Tuple[Move, EngineBoard]] = []
+        # Maps destination (row, col) → (Move, EngineBoard) for the current selection
+        self._dest_to_move: Dict[Tuple[int, int], Tuple[Move, EngineBoard]] = {}
+
+        # Last-move arrow overlay: show direction arrows on marbles that just moved
+        # until the opponent selects or moves new marbles.
+        self._last_moved_cells: List[Tuple[int, int]] = []   # display (row, col)
+        self._last_move_direction: Optional[int] = None       # DIRS key (1..11)
+        self._last_move_color: Optional[Tuple[int, int, int]] = None  # color of mover
+
+        # ── AI agent setup (Human vs AI mode) ──────────────────────────────
+        self.ai_agent: Optional[AIAgent] = None
+        self._ai_thinking = False        # True while the delay is ticking
+        self._ai_think_start: int = 0    # pygame tick when the "thinking" began
+        self._ai_think_delay: int = 600  # milliseconds to pause before AI plays
+
+        if self.game_mode == 0:  # Human vs AI
+            # The AI controls whichever colour the human did NOT pick
+            ai_color = WHITE_COLOR if self.player_color == BLACK_COLOR else BLACK_COLOR
+            ai_player_char = 'b' if ai_color == BLACK_COLOR else 'w'
+            self.ai_agent = AIAgent(ai_player_char)
 
 
         self._setup_back_button()
@@ -76,17 +126,24 @@ class BoardScene:
         self.player_score = 0
         self.opponent_score = 0
 
-        # Timer variables
-        self.total_time = 15 * 60  # 15 minutes in seconds
-        self.move_time_computer = 5  # 5 seconds per move
-        self.move_time_player = 5
+        # Timer variables - set from player configuration
+        self.move_time_player = player1_time if player1_time is not None else 5  # Time per move in seconds
+        self.move_time_computer = player2_time if player2_time is not None else 5  # Time per move for opponent
+
+        # Store original move times for reference during timer updates
+        self._original_move_time_player = self.move_time_player
+        self._original_move_time_computer = self.move_time_computer
+
+        self.total_time = 15 * 60  # 15 minutes in seconds (legacy)
         self.is_game_timer_running = False
         self.start_ticks = 0
 
-        # Move limit variables (set by game configuration)
-        self.max_moves_per_player = 40  # Default move limit per player
-        self.player_moves_remaining = 40  # Player's remaining moves
-        self.computer_moves_remaining = 40  # Computer's remaining moves
+        # Move limit variables - set from player configuration
+        self.player1_move_limit = player1_move_limit if player1_move_limit is not None else 40
+        self.player2_move_limit = player2_move_limit if player2_move_limit is not None else 40
+        self.max_moves_per_player = self.player1_move_limit  # For compatibility
+        self.player_moves_remaining = self.player1_move_limit
+        self.computer_moves_remaining = self.player2_move_limit
 
         self._setup_timers()
 
@@ -103,22 +160,72 @@ class BoardScene:
         self.total_time_box_color = (180, 140, 100)  # Tan/brown color
 
 
+    def _reset_timer_for_next_turn(self) -> None:
+        """Reset ONLY the per-move timer when switching to next player's turn."""
+        # Reset ONLY the per-move timer, NOT the total game timer
+        self.move_start_ticks = pygame.time.get_ticks()
+        self.is_game_timer_running = True
+
     def _update_timers(self) -> None:
         """Update game timers."""
         if not self.is_game_timer_running:
             return
 
-        elapsed = (pygame.time.get_ticks() - self.start_ticks) // 1000
-        self.total_time = max(0, 15 * 60 - elapsed)
+        # Total game time - never resets, counts continuously from game start
+        total_elapsed = (pygame.time.get_ticks() - self.start_ticks) // 1000
+        self.total_time = max(0, 15 * 60 - total_elapsed)
 
-        # Update move timer for current player
-        move_elapsed = elapsed % 10
-        if move_elapsed < 5:
-            self.move_time_player = max(0, 5 - move_elapsed)
-            self.move_time_computer = 5
+        # Per-move timer - resets for each player's turn
+        move_elapsed = (pygame.time.get_ticks() - self.move_start_ticks) // 1000
+
+        # Store the selected times (time per move, not move limits)
+        selected_time_black = 5  # Default
+        selected_time_white = 5  # Default
+
+        # Use the move_time values that were set from configuration
+        # Determine which player is black and which is white
+        if self.player_color == BLACK_COLOR:
+            # Human is black, so opponent is white
+            selected_time_black = self._original_move_time_player if hasattr(self, '_original_move_time_player') else 5
+            selected_time_white = self._original_move_time_computer if hasattr(self, '_original_move_time_computer') else 5
         else:
-            self.move_time_computer = max(0, 10 - move_elapsed)
-            self.move_time_player = 5
+            # Human is white, so opponent is black
+            selected_time_black = self._original_move_time_computer if hasattr(self, '_original_move_time_computer') else 5
+            selected_time_white = self._original_move_time_player if hasattr(self, '_original_move_time_player') else 5
+
+        # Update move timer based on whose turn it is (by color)
+        if self.current_turn_color == BLACK_COLOR:
+            # Black's turn - show black's time
+            current_time = max(0, selected_time_black - move_elapsed)
+            if self.player_color == BLACK_COLOR:
+                self.move_time_player = current_time
+            else:
+                self.move_time_computer = current_time
+            # Trigger timeout if time ran out
+            if current_time == 0 and not self.show_timeout_modal:
+                self._trigger_move_timeout(BLACK_COLOR)
+        else:
+            # White's turn - show white's time
+            current_time = max(0, selected_time_white - move_elapsed)
+            if self.player_color == WHITE_COLOR:
+                self.move_time_player = current_time
+            else:
+                self.move_time_computer = current_time
+            # Trigger timeout if time ran out
+            if current_time == 0 and not self.show_timeout_modal:
+                self._trigger_move_timeout(WHITE_COLOR)
+
+    def _trigger_move_timeout(self, loser_color) -> None:
+        """Stop the game because a player exceeded their per-move time limit.
+
+        Args:
+            loser_color: The color constant (BLACK_COLOR / WHITE_COLOR) of the player who ran out of time.
+        """
+        print(f"Move timeout! {'Black' if loser_color == BLACK_COLOR else 'White'} ran out of time.")
+        self.timeout_loser_color = loser_color
+        self.show_timeout_modal = True
+        self.game_paused = True
+        self.is_game_timer_running = False
 
     def _setup_back_button(self) -> None:
         """Setup the back button in the top-left corner."""
@@ -212,12 +319,12 @@ class BoardScene:
         self.undo_icon_image = None
         self.undo_icon_scaled = None
         try:
-            self.undo_icon_image = pygame.image.load("undo.png")
+            self.undo_icon_image = pygame.image.load("images/undo.png")
             # Scale to fit in circular button
             icon_size = 28  # Icon size for button
             self.undo_icon_scaled = pygame.transform.scale(self.undo_icon_image, (icon_size, icon_size))
         except (FileNotFoundError, pygame.error) as e:
-            print(f"Warning: Could not load undo.png: {e}")
+            print(f"Warning: Could not load images/undo.png: {e}")
 
         # Setup undo text
         self.undo_font = pygame.font.Font(None, 28)
@@ -282,66 +389,414 @@ class BoardScene:
         # based on the actual board hexagon edges
 
 
+    # Row-start column numbers per row letter, matching the move_engine's
+    # standard Abalone coordinate system.
+    _ROW_START = {'A': 1, 'B': 1, 'C': 1, 'D': 1, 'E': 1,
+                  'F': 2, 'G': 3, 'H': 4, 'I': 5}
+    _ROW_LEN = {'A': 5, 'B': 6, 'C': 7, 'D': 8, 'E': 9,
+                'F': 8, 'G': 7, 'H': 6, 'I': 5}
+
     def _cell_to_notation(self, cell: tuple) -> str:
         """
-        Convert (row, col) to cell notation.
-        Rows are labeled A-I where row 0 (top in display) = I, row 8 (bottom in display) = A.
-        Columns are numbered 1-9 from left to right.
+        Convert (row, col) to standard Abalone cell notation.
+        Display row 0 (top) = I, display row 8 (bottom) = A.
+        Column numbers follow the standard Abalone scheme where each row's
+        leftmost cell has a specific starting column number.
 
-        Based on the standard Abalone notation:
-        - Row I (top, 5 cells): I1, I2, I3, I4, I5
-        - Row E (middle, 9 cells): E1, E2, E3, E4, E5, E6, E7, E8, E9
+        Examples:
+        - Row I (top, 5 cells): I5, I6, I7, I8, I9
+        - Row E (middle, 9 cells): E1, E2, …, E9
         - Row A (bottom, 5 cells): A1, A2, A3, A4, A5
 
         Args:
-            cell: Tuple (row, col) where row 0 is top
+            cell: Tuple (row, col) where row 0 is the top display row
 
         Returns:
-            Cell notation string (e.g., 'I1', 'E5', 'A1')
+            Cell notation string (e.g., 'I5', 'E1', 'A1')
         """
         row, col = cell
-
-        # Row labels: I-A (top to bottom, row 0 = I, row 8 = A)
-        # Invert the row: A is at bottom (row 8), I is at top (row 0)
+        if not (0 <= row <= 8):
+            raise ValueError(f"Display row {row} out of range for cell {cell}")
         row_label = chr(ord('I') - row)
-
-        # Column number: Simply 1-indexed position (left to right)
-        col_number = col + 1
-
+        if row_label not in self._ROW_START:
+            raise ValueError(f"Invalid row label {row_label!r} for cell {cell}")
+        col_number = self._ROW_START[row_label] + col
         return f"{row_label}{col_number}"
 
     @staticmethod
     def _notation_to_cell(notation: str) -> Optional[tuple[int, int]]:
         """
-        Convert cell notation to (row, col) coordinates.
+        Convert standard Abalone cell notation to (row, col) coordinates.
         Reverse operation of _cell_to_notation.
 
         Args:
-            notation: Cell notation string (e.g., 'I1', 'E5', 'A1')
+            notation: Cell notation string (e.g., 'I5', 'E1', 'A1')
 
         Returns:
             Tuple (row, col) or None if notation is invalid
         """
-        if len(notation) != 2:
+        if len(notation) < 2:
             return None
 
-        row_label = notation[0]
-        col_str = notation[1]
+        row_label = notation[0].upper()
+        col_str = notation[1:]
+
+        _ROW_START = {'A': 1, 'B': 1, 'C': 1, 'D': 1, 'E': 1,
+                      'F': 2, 'G': 3, 'H': 4, 'I': 5}
+        _ROW_LEN = {'A': 5, 'B': 6, 'C': 7, 'D': 8, 'E': 9,
+                    'F': 8, 'G': 7, 'H': 6, 'I': 5}
 
         try:
-            # Convert row label back to row number (I=0, H=1, ..., A=8)
-            row = ord('I') - ord(row_label)
-
-            # Convert column string to column number (1-indexed to 0-indexed)
-            col = int(col_str) - 1
-
-            # Validate ranges
-            if row < 0 or row > 8 or col < 0 or col > 8:
+            if row_label not in _ROW_START:
                 return None
 
+            row = ord('I') - ord(row_label)
+            col_num = int(col_str)
+            start = _ROW_START[row_label]
+            length = _ROW_LEN[row_label]
+
+            if not (start <= col_num < start + length):
+                return None
+
+            col = col_num - start
             return (row, col)
         except (ValueError, TypeError):
             return None
+
+    # ------------------------------------------------------------------
+    # Coordinate / state conversion helpers  (board_scene ↔ move_engine)
+    # ------------------------------------------------------------------
+
+    def _color_to_player(self, color: Tuple[int, int, int]) -> EnginePlayer:
+        """Map a display colour tuple to engine player char ('b' / 'w')."""
+        return 'b' if color == BLACK_COLOR else 'w'
+
+    def _player_to_color(self, player: EnginePlayer) -> Tuple[int, int, int]:
+        """Map engine player char to display colour tuple."""
+        return BLACK_COLOR if player == 'b' else WHITE_COLOR
+
+    def _board_to_engine_state(self) -> EngineBoard:
+        """Convert self.marble_positions → move_engine Board (axial coords)."""
+        engine_board: EngineBoard = {}
+        for (row, col), color in self.marble_positions.items():
+            try:
+                notation = self._cell_to_notation((row, col))
+                axial = notation_to_axial(notation)
+            except (ValueError, KeyError):
+                continue
+            engine_board[axial] = self._color_to_player(color)
+        return engine_board
+
+    def _engine_board_to_positions(self, engine_board: EngineBoard) -> Dict[Tuple[int, int], Tuple[int, int, int]]:
+        """Convert an engine Board → marble_positions dict."""
+        positions: Dict[Tuple[int, int], Tuple[int, int, int]] = {}
+        for axial, player in engine_board.items():
+            try:
+                notation = axial_to_notation(axial)
+            except (ValueError, KeyError):
+                continue
+            cell = self._notation_to_cell(notation)
+            if cell is not None:
+                positions[cell] = self._player_to_color(player)
+        return positions
+
+    # ------------------------------------------------------------------
+    # Legal-move cache
+    # ------------------------------------------------------------------
+
+    def _recompute_legal_moves(self) -> None:
+        """Recompute and cache all legal moves for the current turn."""
+        engine_board = self._board_to_engine_state()
+        current_player = self._color_to_player(self.current_turn_color)
+        self._legal_moves_cache = generate_moves(current_player, engine_board)
+
+    # ------------------------------------------------------------------
+    # AI turn helper
+    # ------------------------------------------------------------------
+
+    def _maybe_ai_move(self) -> None:
+        """If it is the AI's turn, start a short "thinking" delay and then play.
+
+        Called once per frame from the main ``run`` loop.  The delay gives a
+        visible pause so the human player can see the transition.
+        """
+        if self.ai_agent is None:
+            return
+        if not self.game_started or self.game_paused:
+            return
+        if self.show_pause_modal or self.show_stop_modal or self.show_timeout_modal or self.show_win_modal:
+            return
+
+        # Only act when the current turn colour is the AI's colour
+        is_ai_turn = (self.current_turn_color != self.player_color)
+        if not is_ai_turn:
+            self._ai_thinking = False
+            return
+
+        # Start the "thinking" timer on the first frame of the AI's turn
+        if not self._ai_thinking:
+            self._ai_thinking = True
+            self._ai_think_start = pygame.time.get_ticks()
+            return  # wait for the delay to elapse
+
+        # Wait until the delay has elapsed
+        elapsed = pygame.time.get_ticks() - self._ai_think_start
+        if elapsed < self._ai_think_delay:
+            return
+
+        # --- Execute AI move ---
+        engine_board = self._board_to_engine_state()
+        result = self.ai_agent.select_move(engine_board, self._legal_moves_cache)
+        if result is None:
+            # No legal moves – should not normally happen
+            print("AI has no legal moves!")
+            self._ai_thinking = False
+            return
+
+        move, new_board = result
+        print(f"AI plays: {move.notation()}")
+        self._apply_engine_move(move, new_board)
+        self._ai_thinking = False
+
+    # ------------------------------------------------------------------
+    # Multi-marble selection helpers
+    # ------------------------------------------------------------------
+
+    def _cells_form_valid_group(self, cells: List[Tuple[int, int]]) -> bool:
+        """Return True if *cells* (1–3) are collinear and contiguous on the hex grid."""
+        if len(cells) <= 1:
+            return True
+        if len(cells) > 3:
+            return False
+
+        # Convert to notation then axial for direction checking
+        axials = []
+        for c in cells:
+            try:
+                axials.append(notation_to_axial(self._cell_to_notation(c)))
+            except ValueError:
+                return False
+
+        # For 2 marbles, they must be adjacent along one of the 6 hex directions.
+        dq = axials[1][0] - axials[0][0]
+        dr = axials[1][1] - axials[0][1]
+        if (dq, dr) not in DIRS.values() and (-dq, -dr) not in DIRS.values():
+            return False
+
+        if len(cells) == 3:
+            # Third marble must continue the same direction from either end.
+            dq2 = axials[2][0] - axials[1][0]
+            dr2 = axials[2][1] - axials[1][1]
+            if (dq2, dr2) != (dq, dr):
+                # Try the other ordering: maybe axials[2] is before axials[0]
+                dq3 = axials[0][0] - axials[2][0]
+                dr3 = axials[0][1] - axials[2][1]
+                if (dq3, dr3) != (dq, dr) and (-dq3, -dr3) != (dq, dr):
+                    return False
+        return True
+
+    def _recompute_valid_destinations(self) -> None:
+        """Filter legal-moves cache for the current selection and build dest map.
+
+        For each legal move whose marble group matches self.selected_marbles,
+        we determine a *clickable destination cell* and map it to the (Move, Board) pair.
+
+        Destination cell logic:
+        - For an inline move we show the cell just beyond the leading marble.
+        - For a side-step move we show the new positions that are NOT in the group.
+        """
+        self._dest_to_move = {}
+        if not self.selected_marbles:
+            return
+
+        # Build set of notations for current selection
+        sel_notations: Set[str] = set()
+        for c in self.selected_marbles:
+            sel_notations.add(self._cell_to_notation(c))
+
+        for move, new_board in self._legal_moves_cache:
+            # Reconstruct the group of marbles involved in this move
+            move_notations: Set[str] = set()
+
+            if move.b is None:
+                # Single marble inline
+                move_notations.add(move.a)
+            elif move.kind == 'i':
+                # Inline group: trailing=a, leading=b, line direction=d
+                a_ax = notation_to_axial(move.a)
+                d = DIRS[move.d]
+                # Walk from a toward d until we reach b
+                for size in (2, 3):
+                    grp = group_cells(a_ax, d, size)
+                    if any(g not in ENGINE_CELLS for g in grp):
+                        continue
+                    if axial_to_notation(grp[-1]) == move.b:
+                        for g in grp:
+                            move_notations.add(axial_to_notation(g))
+                        break
+            else:
+                # Side-step: a and b are extremities in sorted order
+                # Line direction is one of CANONICAL_DIRS or its opposite
+                a_ax = notation_to_axial(move.a)
+                b_ax = notation_to_axial(move.b)
+                found = False
+                for ld_num in list(CANONICAL_DIRS) + [OPPOSITE[cd] for cd in CANONICAL_DIRS]:
+                    ld = DIRS[ld_num]
+                    for size in (2, 3):
+                        grp = group_cells(a_ax, ld, size)
+                        if any(g not in ENGINE_CELLS for g in grp):
+                            continue
+                        if axial_to_notation(grp[-1]) == move.b:
+                            for g in grp:
+                                move_notations.add(axial_to_notation(g))
+                            found = True
+                            break
+                    if found:
+                        break
+
+            if move_notations != sel_notations:
+                continue
+
+            # This move matches our selection — compute destination cell(s)
+            if move.kind == 'i':
+                # Inline: destination is one cell beyond the leading marble
+                d = DIRS[move.d]
+                leading_ax = notation_to_axial(move.b if move.b else move.a)
+                dest_ax = cell_add(leading_ax, d)
+                if dest_ax in ENGINE_CELLS:
+                    dest_cell = self._notation_to_cell(axial_to_notation(dest_ax))
+                    if dest_cell is not None:
+                        self._dest_to_move[dest_cell] = (move, new_board)
+            else:
+                # Side-step: show new positions that are NOT part of the group
+                d = DIRS[move.d]
+                for sel_cell in self.selected_marbles:
+                    sel_ax = notation_to_axial(self._cell_to_notation(sel_cell))
+                    dest_ax = cell_add(sel_ax, d)
+                    if dest_ax in ENGINE_CELLS:
+                        dest_cell = self._notation_to_cell(axial_to_notation(dest_ax))
+                        if dest_cell is not None and dest_cell not in self.selected_marbles:
+                            if dest_cell not in self._dest_to_move:
+                                self._dest_to_move[dest_cell] = (move, new_board)
+
+    def _apply_engine_move(self, move: Move, new_engine_board: EngineBoard) -> None:
+        """Apply a validated engine move: update positions, scores, history, turn."""
+        old_positions = self.marble_positions.copy()
+        new_positions = self._engine_board_to_positions(new_engine_board)
+
+        # Count marbles before and after to detect push-offs
+        def _count(positions, color):
+            return sum(1 for c in positions.values() if c == color)
+
+        opp_color = WHITE_COLOR if self.current_turn_color == BLACK_COLOR else BLACK_COLOR
+        old_opp = _count(old_positions, opp_color)
+        new_opp = _count(new_positions, opp_color)
+        pushed_off = old_opp - new_opp  # number of opponent marbles pushed off
+
+        # Update scores
+        if self.current_turn_color == self.player_color:
+            self.player_score += pushed_off
+        else:
+            self.opponent_score += pushed_off
+
+        # Check win condition (first to 6 points wins)
+        if self.player_score >= 6:
+            self._trigger_win(self.player_color)
+        elif self.opponent_score >= 6:
+            opp = WHITE_COLOR if self.player_color == BLACK_COLOR else BLACK_COLOR
+            self._trigger_win(opp)
+
+        # Record move in history — store board snapshot for undo
+        marble_color = self.current_turn_color
+        self.move_history.append((move.notation(), marble_color, old_positions))
+
+        # ── Record last-moved marbles & direction for arrow overlay ──
+        # Determine which display cells were part of this move's group
+        moved_cells: List[Tuple[int, int]] = []
+        if move.b is None:
+            # Single marble inline
+            cell = self._notation_to_cell(move.a)
+            if cell is not None:
+                moved_cells.append(cell)
+        elif move.kind == 'i':
+            # Inline group: trailing=a, leading=b
+            a_ax = notation_to_axial(move.a)
+            d = DIRS[move.d]
+            for size in (2, 3):
+                grp = group_cells(a_ax, d, size)
+                if any(g not in ENGINE_CELLS for g in grp):
+                    continue
+                if axial_to_notation(grp[-1]) == move.b:
+                    for g in grp:
+                        c = self._notation_to_cell(axial_to_notation(g))
+                        if c is not None:
+                            moved_cells.append(c)
+                    break
+        else:
+            # Side-step
+            a_ax = notation_to_axial(move.a)
+            b_ax = notation_to_axial(move.b)
+            found = False
+            for ld_num in list(CANONICAL_DIRS) + [OPPOSITE[cd] for cd in CANONICAL_DIRS]:
+                ld = DIRS[ld_num]
+                for size in (2, 3):
+                    grp = group_cells(a_ax, ld, size)
+                    if any(g not in ENGINE_CELLS for g in grp):
+                        continue
+                    if axial_to_notation(grp[-1]) == move.b:
+                        for g in grp:
+                            c = self._notation_to_cell(axial_to_notation(g))
+                            if c is not None:
+                                moved_cells.append(c)
+                        found = True
+                        break
+                if found:
+                    break
+
+        # The arrows should appear on the NEW positions of the moved marbles
+        # (i.e. after the move). Shift each cell by the move direction.
+        dest_cells: List[Tuple[int, int]] = []
+        d_vec = DIRS[move.d]
+        for mc in moved_cells:
+            try:
+                ax = notation_to_axial(self._cell_to_notation(mc))
+                dest_ax = cell_add(ax, d_vec)
+                if dest_ax in ENGINE_CELLS:
+                    dc = self._notation_to_cell(axial_to_notation(dest_ax))
+                    if dc is not None:
+                        dest_cells.append(dc)
+            except (ValueError, KeyError):
+                pass
+
+        self._last_moved_cells = dest_cells if dest_cells else moved_cells
+        self._last_move_direction = move.d
+        self._last_move_color = marble_color
+
+        # Apply new board
+        self.marble_positions = new_positions
+
+        # Decrement move counts
+        if marble_color == self.player_color:
+            self.player_moves_remaining -= 1
+            if self.player_moves_remaining <= 0:
+                self.game_paused = True
+                self.show_pause_modal = True
+        else:
+            self.computer_moves_remaining -= 1
+            if self.computer_moves_remaining <= 0:
+                self.game_paused = True
+                self.show_pause_modal = True
+
+        # Switch turn
+        self.current_turn_color = WHITE_COLOR if self.current_turn_color == BLACK_COLOR else BLACK_COLOR
+
+        # Reset timer for next turn
+        self._reset_timer_for_next_turn()
+
+        # Clear selection and recompute legal moves for next player
+        self.selected_marbles = []
+        self._dest_to_move = {}
+        self._recompute_legal_moves()
 
     def _setup_control_buttons(self) -> None:
         """Setup the control buttons (start, pause, stop, reset) in the bottom box."""
@@ -363,12 +818,12 @@ class BoardScene:
         self.reset_icon_image = None
         self.reset_icon_scaled = None
         try:
-            self.reset_icon_image = pygame.image.load("reset_icon.png")
+            self.reset_icon_image = pygame.image.load("images/reset_icon.png")
             # Scale to fit within button (slightly smaller than button size for padding)
             icon_size = int(button_size * 0.7)
             self.reset_icon_scaled = pygame.transform.scale(self.reset_icon_image, (icon_size, icon_size))
         except (FileNotFoundError, pygame.error) as e:
-            print(f"Warning: Could not load reset_icon.png: {e}")
+            print(f"Warning: Could not load images/reset_icon.png: {e}")
             # Will fall back to drawing the icon programmatically
 
         # Create button rectangles (circular)
@@ -536,6 +991,20 @@ class BoardScene:
                 # Window was resized, update positions
                 self._update_positions()
             if event.type == pygame.MOUSEBUTTONDOWN:
+                # If timeout modal is showing, handle modal button clicks and block everything else
+                if self.show_timeout_modal:
+                    self._handle_timeout_modal_click(event.pos)
+                    if not self.running:
+                        return False
+                    continue
+
+                # If win modal is showing, handle modal button clicks and block everything else
+                if self.show_win_modal:
+                    self._handle_win_modal_click(event.pos)
+                    if not self.running:
+                        return False
+                    continue
+
                 # If pause modal is showing, handle modal button clicks
                 if self.show_pause_modal:
                     self._handle_pause_modal_click(event.pos)
@@ -571,43 +1040,64 @@ class BoardScene:
                     self._handle_undo_button_click()
                     continue
 
-                # Check if a destination ball was clicked to move the selected marble
-                if self.is_human_turn and self.game_started and not self.game_paused and self.selected_marble:
+                # Determine whether the human player is allowed to interact
+                # In Human vs AI (mode 0) or AI vs AI (mode 1), only allow
+                # interaction when it is the human player's turn.
+                # In Human vs Human (mode 2), both turns allow interaction.
+                _human_can_interact = (
+                    self.game_mode == 2
+                    or (self.game_mode == 0 and self.current_turn_color == self.player_color)
+                )
+
+                # Check if a destination dot was clicked to execute the move
+                if self.game_started and not self.game_paused and _human_can_interact and self.selected_marbles:
                     clicked_cell = self._get_cell_at_position(event.pos)
-                    if clicked_cell and clicked_cell in self._get_valid_destinations(self.selected_marble):
-                        # Move the selected marble to the clicked destination
-                        from_notation = self._cell_to_notation(self.selected_marble)
-                        to_notation = self._cell_to_notation(clicked_cell)
-                        move_notation = f"{from_notation}{to_notation}"
-                        marble_color = self.marble_positions[self.selected_marble]
-                        self.move_history.append((move_notation, marble_color))
-
-                        self.marble_positions[clicked_cell] = self.marble_positions[self.selected_marble]
-                        del self.marble_positions[self.selected_marble]
-
-                        self.player_moves_remaining -= 1
-                        print(f"Player move made! Remaining moves: {self.player_moves_remaining}")
-
-                        if self.player_moves_remaining <= 0:
-                            print("Player has reached move limit!")
-                            self.game_paused = True
-                            self.show_pause_modal = True
-
-                        self.selected_marble = None
+                    if clicked_cell and clicked_cell in self._dest_to_move:
+                        move, new_board = self._dest_to_move[clicked_cell]
+                        self._apply_engine_move(move, new_board)
                         continue
 
-                # Check if a marble was clicked for dragging (only if game is started and not paused)
-                if self.is_human_turn and self.game_started and not self.game_paused:
+                # Marble click handling: multi-select up to 3 same-color marbles
+                if self.game_started and not self.game_paused and _human_can_interact:
                     marble_at_pos = self._get_marble_at_position(event.pos)
-                    if marble_at_pos and self.marble_positions.get(marble_at_pos) == self.player_color:
-                        # Always start dragging; deselection is resolved on MOUSEBUTTONUP
-                        self.mouse_down_pos = event.pos
-                        self._marble_before_drag = self.selected_marble  # remember prior selection
-                        self.selected_marble = marble_at_pos
-                        self.dragging = True
-                        self.dragged_marble = marble_at_pos
-                        marble_center = self._get_marble_screen_position(marble_at_pos)
-                        self.drag_offset = (event.pos[0] - marble_center[0], event.pos[1] - marble_center[1])
+                    if marble_at_pos and self.marble_positions.get(marble_at_pos) == self.current_turn_color:
+                        # Clear last-move arrows when the opponent starts selecting
+                        if self._last_move_color is not None and self._last_move_color != self.current_turn_color:
+                            self._last_moved_cells = []
+                            self._last_move_direction = None
+                            self._last_move_color = None
+                        if marble_at_pos in self.selected_marbles:
+                            # Toggle off: deselect this marble
+                            self.selected_marbles.remove(marble_at_pos)
+                            # After removing, remaining marbles must still form a valid group
+                            if not self._cells_form_valid_group(self.selected_marbles):
+                                self.selected_marbles = []
+                            self._recompute_valid_destinations()
+                        else:
+                            # Try adding to the current selection
+                            candidate = self.selected_marbles + [marble_at_pos]
+                            if len(candidate) <= 3 and self._cells_form_valid_group(candidate):
+                                self.selected_marbles = candidate
+                                self._recompute_valid_destinations()
+                            else:
+                                # Start a new selection with just this marble
+                                self.selected_marbles = [marble_at_pos]
+                                self._recompute_valid_destinations()
+
+                        # Also start drag for single marble
+                        if len(self.selected_marbles) == 1 and marble_at_pos in self.selected_marbles:
+                            self.mouse_down_pos = event.pos
+                            self._marble_before_drag = list(self.selected_marbles)
+                            self.dragging = True
+                            self.dragged_marble = marble_at_pos
+                            marble_center = self._get_marble_screen_position(marble_at_pos)
+                            self.drag_offset = (event.pos[0] - marble_center[0], event.pos[1] - marble_center[1])
+                    elif marble_at_pos is None:
+                        # Clicked empty space / non-current-turn marble → deselect
+                        clicked_cell = self._get_cell_at_position(event.pos)
+                        if clicked_cell is None or clicked_cell not in self._dest_to_move:
+                            self.selected_marbles = []
+                            self._dest_to_move = {}
 
             if event.type == pygame.MOUSEBUTTONUP:
                 if self.dragging and self.dragged_marble:
@@ -621,47 +1111,21 @@ class BoardScene:
                         was_drag = True
 
                     if not was_drag:
-                        # It was a plain click — deselect only if this marble was already
-                        # selected before the mouse-down (i.e. the user tapped to deselect)
-                        released_on = self._get_marble_at_position(event.pos)
-                        if released_on == self.dragged_marble and self._marble_before_drag == self.dragged_marble:
-                            self.selected_marble = None  # deselect
-                        # else: marble stays selected (new selection on tap)
+                        # Plain click — selection was already handled on MOUSEBUTTONDOWN
                         self.dragging = False
                         self.dragged_marble = None
                         self.drag_offset = (0, 0)
                         self.mouse_down_pos = None
                         self._marble_before_drag = None
                         continue
-                    # Try to drop the marble
+
+                    # Try to drop the marble onto a valid destination
                     drop_cell = self._get_cell_at_position(event.pos)
-                    if drop_cell and self._is_valid_move(self.dragged_marble, drop_cell):
-                        # Record the move in history
-                        from_notation = self._cell_to_notation(self.dragged_marble)
-                        to_notation = self._cell_to_notation(drop_cell)
-                        move_notation = f"{from_notation}{to_notation}"
-                        marble_color = self.marble_positions[self.dragged_marble]
-                        self.move_history.append((move_notation, marble_color))
+                    if drop_cell and drop_cell in self._dest_to_move:
+                        move, new_board = self._dest_to_move[drop_cell]
+                        self._apply_engine_move(move, new_board)
 
-                        # Move the marble
-                        self.marble_positions[drop_cell] = self.marble_positions[self.dragged_marble]
-                        del self.marble_positions[self.dragged_marble]
-
-                        # Decrement player's move limit
-                        self.player_moves_remaining -= 1
-                        print(f"Player move made! Remaining moves: {self.player_moves_remaining}")
-
-                        # Check if player reached move limit
-                        if self.player_moves_remaining <= 0:
-                            print("Player has reached move limit!")
-                            self.game_paused = True
-                            self.show_pause_modal = True
-                            # TODO: Show game over message or end game
-
-                        # Clear selection after a successful move
-                        self.selected_marble = None
-
-                    # Reset dragging state (but keep selection if move wasn't made)
+                    # Reset dragging state (selection persists if move wasn't made)
                     self.dragging = False
                     self.dragged_marble = None
                     self.drag_offset = (0, 0)
@@ -693,14 +1157,17 @@ class BoardScene:
             self.game_started = True
             self.game_paused = False
             self.is_game_timer_running = True
-            self.start_ticks = pygame.time.get_ticks()
+            self.start_ticks = pygame.time.get_ticks()  # Total game time starts here (never resets)
+            self.move_start_ticks = pygame.time.get_ticks()  # Per-move timer starts here (will reset per turn)
+            self._recompute_legal_moves()
             print("Game started!")
         elif self.game_paused:
             # Resume if paused
             self.game_paused = False
             self.show_pause_modal = False
             self.is_game_timer_running = True
-            self.start_ticks = pygame.time.get_ticks()
+            # Don't reset start_ticks - total game time keeps running
+            self.move_start_ticks = pygame.time.get_ticks()  # Reset per-move timer when resuming
             print("Game resumed!")
         else:
             print("Game is already running!")
@@ -749,6 +1216,185 @@ class BoardScene:
             self.show_stop_modal = False
             print("Stop cancelled")
 
+    def _get_timeout_modal_geometry(self) -> dict:
+        """Get timeout game-over modal dimensions and button position."""
+        window_w, window_h = self.screen.get_size()
+
+        modal_width = 460
+        modal_height = 260
+        modal_x = (window_w - modal_width) // 2
+        modal_y = (window_h - modal_height) // 2
+
+        button_width = 160
+        button_height = 50
+        button_x = modal_x + (modal_width - button_width) // 2
+        button_y = modal_y + modal_height - 75
+
+        return {
+            'modal_x': modal_x,
+            'modal_y': modal_y,
+            'modal_width': modal_width,
+            'modal_height': modal_height,
+            'ok_button': pygame.Rect(button_x, button_y, button_width, button_height),
+        }
+
+    def _handle_timeout_modal_click(self, pos: tuple) -> None:
+        """Handle clicks on the timeout game-over modal."""
+        geom = self._get_timeout_modal_geometry()
+        if geom['ok_button'].collidepoint(pos):
+            # Go back to menu
+            self.show_timeout_modal = False
+            self.go_back = True
+            self.running = False
+
+    def _draw_timeout_modal(self) -> None:
+        """Draw the move-timeout game-over modal."""
+        window_w, window_h = self.screen.get_size()
+        geom = self._get_timeout_modal_geometry()
+
+        # Semi-transparent overlay
+        overlay = pygame.Surface((window_w, window_h), pygame.SRCALPHA)
+        overlay.fill((0, 0, 0, 160))
+        self.screen.blit(overlay, (0, 0))
+
+        # Modal background
+        modal_rect = pygame.Rect(geom['modal_x'], geom['modal_y'], geom['modal_width'], geom['modal_height'])
+        pygame.draw.rect(self.screen, (240, 240, 240), modal_rect, border_radius=15)
+        pygame.draw.rect(self.screen, (180, 60, 60), modal_rect, width=4, border_radius=15)
+
+        # Title: "Game Over"
+        title_font = pygame.font.Font(None, 60)
+        title_text = title_font.render("Game Over!", True, (180, 60, 60))
+        title_rect = title_text.get_rect(center=(geom['modal_x'] + geom['modal_width'] // 2,
+                                                  geom['modal_y'] + 60))
+        self.screen.blit(title_text, title_rect)
+
+        # Determine loser name
+        if self.timeout_loser_color == BLACK_COLOR:
+            loser_name = "Black"
+        else:
+            loser_name = "White"
+
+        # Message
+        msg_font = pygame.font.Font(None, 34)
+        line1 = msg_font.render("Time's up! No move was made in time.", True, (50, 50, 50))
+        line2 = msg_font.render(f"{loser_name} player has lost!", True, (50, 50, 50))
+        line1_rect = line1.get_rect(center=(geom['modal_x'] + geom['modal_width'] // 2,
+                                             geom['modal_y'] + 130))
+        line2_rect = line2.get_rect(center=(geom['modal_x'] + geom['modal_width'] // 2,
+                                             geom['modal_y'] + 165))
+        self.screen.blit(line1, line1_rect)
+        self.screen.blit(line2, line2_rect)
+
+        # OK button
+        mouse_pos = pygame.mouse.get_pos()
+        ok_color = (184, 202, 176) if geom['ok_button'].collidepoint(mouse_pos) else (164, 182, 156)
+        pygame.draw.rect(self.screen, ok_color, geom['ok_button'], border_radius=10)
+        pygame.draw.rect(self.screen, (255, 255, 255), geom['ok_button'], width=2, border_radius=10)
+
+        ok_font = pygame.font.Font(None, 38)
+        ok_text = ok_font.render("OK", True, (255, 255, 255))
+        ok_text_rect = ok_text.get_rect(center=geom['ok_button'].center)
+        self.screen.blit(ok_text, ok_text_rect)
+
+    # ------------------------------------------------------------------
+    # Win condition (score reaches 6)
+    # ------------------------------------------------------------------
+
+    def _trigger_win(self, winner_color) -> None:
+        """Stop the game because a player reached 6 points.
+
+        Args:
+            winner_color: The color constant (BLACK_COLOR / WHITE_COLOR) of the winning player.
+        """
+        winner_name = "Black" if winner_color == BLACK_COLOR else "White"
+        print(f"Game Over! {winner_name} wins with 6 points!")
+        self.winner_color = winner_color
+        self.show_win_modal = True
+        self.game_paused = True
+        self.is_game_timer_running = False
+
+    def _get_win_modal_geometry(self) -> dict:
+        """Get win game-over modal dimensions and button position."""
+        window_w, window_h = self.screen.get_size()
+
+        modal_width = 460
+        modal_height = 260
+        modal_x = (window_w - modal_width) // 2
+        modal_y = (window_h - modal_height) // 2
+
+        button_width = 160
+        button_height = 50
+        button_x = modal_x + (modal_width - button_width) // 2
+        button_y = modal_y + modal_height - 75
+
+        return {
+            'modal_x': modal_x,
+            'modal_y': modal_y,
+            'modal_width': modal_width,
+            'modal_height': modal_height,
+            'ok_button': pygame.Rect(button_x, button_y, button_width, button_height),
+        }
+
+    def _handle_win_modal_click(self, pos: tuple) -> None:
+        """Handle clicks on the win game-over modal."""
+        geom = self._get_win_modal_geometry()
+        if geom['ok_button'].collidepoint(pos):
+            # Go back to menu
+            self.show_win_modal = False
+            self.go_back = True
+            self.running = False
+
+    def _draw_win_modal(self) -> None:
+        """Draw the win game-over modal."""
+        window_w, window_h = self.screen.get_size()
+        geom = self._get_win_modal_geometry()
+
+        # Semi-transparent overlay
+        overlay = pygame.Surface((window_w, window_h), pygame.SRCALPHA)
+        overlay.fill((0, 0, 0, 160))
+        self.screen.blit(overlay, (0, 0))
+
+        # Modal background
+        modal_rect = pygame.Rect(geom['modal_x'], geom['modal_y'], geom['modal_width'], geom['modal_height'])
+        pygame.draw.rect(self.screen, (240, 240, 240), modal_rect, border_radius=15)
+        pygame.draw.rect(self.screen, (60, 140, 60), modal_rect, width=4, border_radius=15)
+
+        # Title: "Game Over!"
+        title_font = pygame.font.Font(None, 60)
+        title_text = title_font.render("Game Over!", True, (60, 140, 60))
+        title_rect = title_text.get_rect(center=(geom['modal_x'] + geom['modal_width'] // 2,
+                                                  geom['modal_y'] + 60))
+        self.screen.blit(title_text, title_rect)
+
+        # Determine winner name
+        if self.winner_color == BLACK_COLOR:
+            winner_name = "Black"
+        else:
+            winner_name = "White"
+
+        # Message
+        msg_font = pygame.font.Font(None, 34)
+        line1 = msg_font.render(f"{winner_name} player scored 6 points!", True, (50, 50, 50))
+        line2 = msg_font.render(f"{winner_name} wins the game!", True, (50, 50, 50))
+        line1_rect = line1.get_rect(center=(geom['modal_x'] + geom['modal_width'] // 2,
+                                             geom['modal_y'] + 130))
+        line2_rect = line2.get_rect(center=(geom['modal_x'] + geom['modal_width'] // 2,
+                                             geom['modal_y'] + 165))
+        self.screen.blit(line1, line1_rect)
+        self.screen.blit(line2, line2_rect)
+
+        # OK button
+        mouse_pos = pygame.mouse.get_pos()
+        ok_color = (184, 202, 176) if geom['ok_button'].collidepoint(mouse_pos) else (164, 182, 156)
+        pygame.draw.rect(self.screen, ok_color, geom['ok_button'], border_radius=10)
+        pygame.draw.rect(self.screen, (255, 255, 255), geom['ok_button'], width=2, border_radius=10)
+
+        ok_font = pygame.font.Font(None, 38)
+        ok_text = ok_font.render("OK", True, (255, 255, 255))
+        ok_text_rect = ok_text.get_rect(center=geom['ok_button'].center)
+        self.screen.blit(ok_text, ok_text_rect)
+
     def _reset_game(self) -> None:
         """Reset the game board to initial state."""
         if self.initial_marble_positions:
@@ -759,10 +1405,22 @@ class BoardScene:
             self.is_human_turn = True
             self.game_paused = False
             self.show_pause_modal = False
+            self.show_win_modal = False
+            self.winner_color = None
             self.is_game_timer_running = False
             self.total_time = 15 * 60
             self.move_time_computer = 5
             self.move_time_player = 5
+            self.selected_marbles = []
+            self._dest_to_move = {}
+            self._legal_moves_cache = []
+            self._last_moved_cells = []
+            self._last_move_direction = None
+            self._last_move_color = None
+            self.current_turn_color = BLACK_COLOR
+            self._ai_thinking = False
+            if self.game_started:
+                self._recompute_legal_moves()
             print("Game reset to initial state!")
 
     def _get_pause_modal_geometry(self) -> dict:
@@ -857,31 +1515,37 @@ class BoardScene:
             print("Cannot undo while game is paused. Resume first.")
             return
 
-        # Get the last move from history
-        last_move_notation, marble_color = self.move_history.pop()
+        # History entries are (move_notation, marble_color, old_positions_snapshot)
+        entry = self.move_history.pop()
+        if len(entry) == 3:
+            move_notation, marble_color, old_positions = entry
+            # Recompute score delta: count opponent marbles now vs in snapshot
+            opp_color = WHITE_COLOR if marble_color == BLACK_COLOR else BLACK_COLOR
+            old_opp_count = sum(1 for c in old_positions.values() if c == opp_color)
+            cur_opp_count = sum(1 for c in self.marble_positions.values() if c == opp_color)
+            pushed_off = old_opp_count - cur_opp_count  # positive = marbles were pushed off
 
-        # Parse the move notation to get from and to positions
-        # Format: e.g., "I1I2" (from I1 to I2)
-        from_notation = last_move_notation[:2]  # e.g., "I1"
-        to_notation = last_move_notation[2:]    # e.g., "I2"
+            if marble_color == self.player_color:
+                self.player_score = max(0, self.player_score - pushed_off)
+                self.player_moves_remaining += 1
+            else:
+                self.opponent_score = max(0, self.opponent_score - pushed_off)
+                self.computer_moves_remaining += 1
 
-        # Convert notation back to (row, col)
-        from_cell = self._notation_to_cell(from_notation)
-        to_cell = self._notation_to_cell(to_notation)
-
-        if from_cell is None or to_cell is None:
-            print("Error: Could not parse move notation")
-            self.move_history.append((last_move_notation, marble_color))
-            return
-
-        # Move the marble back from to_cell to from_cell
-        if to_cell in self.marble_positions:
-            self.marble_positions[from_cell] = self.marble_positions[to_cell]
-            del self.marble_positions[to_cell]
-            print(f"Undo successful! Reversed move: {last_move_notation}")
+            self.marble_positions = old_positions
+            # Reverse the turn switch
+            self.current_turn_color = marble_color
+            self.selected_marbles = []
+            self._dest_to_move = {}
+            self._last_moved_cells = []
+            self._last_move_direction = None
+            self._last_move_color = None
+            self._recompute_legal_moves()
+            print(f"Undo successful! Reversed move: {move_notation}")
         else:
-            print("Error: Could not undo move - target cell not found")
-            self.move_history.append((last_move_notation, marble_color))
+            # Legacy 2-tuple format fallback
+            move_notation, marble_color = entry[0], entry[1]
+            print(f"Cannot undo legacy move format: {move_notation}")
 
     def _get_marble_at_position(self, pos: tuple[int, int]) -> Optional[tuple[int, int]]:
         """
@@ -1041,7 +1705,8 @@ class BoardScene:
         pygame.draw.rect(self.screen, self.horizontal_box_color, self.horizontal_box_rect)
 
         # Draw turn indicator text in the center of the horizontal box
-        turn_text = self.human_turn_text if self.is_human_turn else self.computer_turn_text
+        is_human = (self.current_turn_color == self.player_color)
+        turn_text = self.human_turn_text if is_human else self.computer_turn_text
         turn_text_rect = turn_text.get_rect(center=self.horizontal_box_rect.center)
         self.screen.blit(turn_text, turn_text_rect)
 
@@ -1089,6 +1754,14 @@ class BoardScene:
         # Draw stop confirmation modal if showing
         if self.show_stop_modal:
             self._draw_stop_modal()
+
+        # Draw timeout game-over modal if showing
+        if self.show_timeout_modal:
+            self._draw_timeout_modal()
+
+        # Draw win game-over modal if showing
+        if self.show_win_modal:
+            self._draw_win_modal()
 
         pygame.display.flip()
 
@@ -1224,7 +1897,7 @@ class BoardScene:
     def _draw_board_and_marbles(self) -> None:
         """Draw the board hexagon and all marbles."""
         # Draw the hexagonal board
-        from src.constants import CELL_MARGIN, RIM_WIDTH, BORDER_COLOR, BOARD_FILL, EMPTY_COLOR
+        from src.ui.constants import CELL_MARGIN, RIM_WIDTH, BORDER_COLOR, BOARD_FILL, EMPTY_COLOR
 
         # Inner hex should fully contain all circles (radius + margin)
         inner_hex = self.board_renderer._hex_polygon_around_cells(extra=CELL_MARGIN)
@@ -1235,11 +1908,8 @@ class BoardScene:
         pygame.draw.polygon(self.screen, BORDER_COLOR, outer_hex)
         pygame.draw.polygon(self.screen, BOARD_FILL, inner_hex)
 
-        # Get valid destinations for selected or dragged marble
-        valid_destinations = []
-        marble_to_show_moves = self.dragged_marble if self.dragging else self.selected_marble
-        if marble_to_show_moves:
-            valid_destinations = self._get_valid_destinations(marble_to_show_moves)
+        # Valid destinations come from the move-engine destination map
+        valid_destinations = set(self._dest_to_move.keys())
 
         # Draw all cells and marbles
         for row, row_cells in enumerate(self.board_renderer.cell_centers):
@@ -1259,56 +1929,150 @@ class BoardScene:
                     pygame.draw.circle(self.screen, (120, 120, 120), (x, y), CELL_RADIUS + 1)
                     pygame.draw.circle(self.screen, color, (x, y), CELL_RADIUS)
 
-                    # If this marble is selected (but not being dragged), highlight it
-                    if self.selected_marble == cell and not self.dragging:
+                    # If this marble is in the selected group, highlight it
+                    if cell in self.selected_marbles and not self.dragging:
                         pygame.draw.circle(self.screen, (255, 215, 0), (x, y), CELL_RADIUS + 4, 3)  # Gold ring
 
 
-                    # If this is a valid destination, draw a small white solid ball inside
+                    # If this is a valid destination, draw a small yellow solid ball inside
                     if cell in valid_destinations:
-                        # Draw a small white solid ball to indicate valid destination
+                        # Draw a small yellow solid ball to indicate valid destination
                         ball_radius = 6  # Small solid ball
-                        pygame.draw.circle(self.screen, (255, 255, 255), (x, y), ball_radius)  # White solid ball
+                        pygame.draw.circle(self.screen, (255, 215, 0), (x, y), ball_radius)  # Yellow solid ball
+
+        # ── Draw direction arrows on last-moved marbles ──────────────────
+        if self._last_moved_cells and self._last_move_direction is not None:
+            self._draw_move_arrows()
+
+    def _draw_move_arrows(self) -> None:
+        """Draw direction arrows on the last-moved marbles.
+
+        The arrow colour contrasts with the marble colour so it is always
+        visible (white arrow on black marbles, dark arrow on white marbles).
+        """
+        if not self._last_moved_cells or self._last_move_direction is None:
+            return
+
+        # Map engine direction number to a screen-space angle (radians).
+        # The display grid spaces adjacent rows by DY vertically and offsets
+        # them by 0.5*DX horizontally, giving ~60° diagonal directions.
+        # Screen: 0 = right, π/2 = down (pygame Y-axis points downward).
+        _dir_angles: Dict[int, float] = {
+            1:  -math.pi / 3,              # NE → ~-60°  (up-right)
+            3:   0.0,                       # E  →   0°   (right)
+            5:   math.pi / 3,              # SE → ~+60°  (down-right)
+            7:   math.pi - math.pi / 3,    # SW → ~+120° (down-left)
+            9:   math.pi,                  # W  → 180°   (left)
+            11: -(math.pi - math.pi / 3),  # NW → ~-120° (up-left)
+        }
+
+        angle = _dir_angles.get(self._last_move_direction)
+        if angle is None:
+            return
+
+        # Choose arrow colour to contrast with marble colour
+        if self._last_move_color == BLACK_COLOR:
+            arrow_color = (255, 255, 255)  # white arrow on black marble
+        else:
+            arrow_color = (30, 30, 30)     # dark arrow on white marble
+
+        arrow_len = CELL_RADIUS * 0.55   # length of the arrow shaft
+        head_len = CELL_RADIUS * 0.35    # length of the arrowhead
+        head_half_w = CELL_RADIUS * 0.22 # half-width of the arrowhead base
+
+        cos_a = math.cos(angle)
+        sin_a = math.sin(angle)
+
+        for cell in self._last_moved_cells:
+            # Only draw on cells that currently have a marble
+            if cell not in self.marble_positions:
+                continue
+            cx, cy = self._get_marble_screen_position(cell)
+
+            # Shaft: from centre offset slightly back to a point forward
+            sx = cx - cos_a * arrow_len * 0.4
+            sy = cy - sin_a * arrow_len * 0.4
+            ex = cx + cos_a * arrow_len * 0.6
+            ey = cy + sin_a * arrow_len * 0.6
+
+            # Draw shaft line
+            pygame.draw.line(self.screen, arrow_color,
+                             (int(sx), int(sy)), (int(ex), int(ey)), 3)
+
+            # Arrowhead (filled triangle) at the tip
+            tip_x = ex + cos_a * head_len
+            tip_y = ey + sin_a * head_len
+            # Perpendicular offsets for the two base corners
+            perp_cos = math.cos(angle + math.pi / 2)
+            perp_sin = math.sin(angle + math.pi / 2)
+            base1 = (ex + perp_cos * head_half_w, ey + perp_sin * head_half_w)
+            base2 = (ex - perp_cos * head_half_w, ey - perp_sin * head_half_w)
+            pygame.draw.polygon(self.screen, arrow_color, [
+                (int(tip_x), int(tip_y)),
+                (int(base1[0]), int(base1[1])),
+                (int(base2[0]), int(base2[1])),
+            ])
 
     def _draw_move_history(self) -> None:
-        """Draw the move history header text and list of moves with colored indicators."""
+        """Draw the move history header text and two-column list of moves (Black | White)."""
         # Draw header text at the left side of the move history section
         text_x = self.move_history_rect.x + 10  # Small left padding
         text_y = self.move_history_rect.centery - (self.move_history_text.get_height() // 2)
         self.screen.blit(self.move_history_text, (text_x, text_y))
 
-        # Draw move history entries below the header
-        if self.move_history:
-            # Font for move entries
-            move_font = pygame.font.Font(None, 22)
-            move_text_color = (50, 50, 50)  # Dark gray text
-            ball_radius = 5  # Small solid ball indicator
+        # Font for move entries
+        move_font = pygame.font.Font(None, 20)
 
-            # Starting position for move list (below the header)
-            list_start_y = self.move_history_y + self.move_history_height + 5
-            line_height = 25  # Height for each move entry
+        # Font colors: black text for black moves, white text for white moves
+        black_text_color = (15, 15, 15)       # Black font
+        white_text_color = (245, 245, 245)    # White font
+        white_outline_color = (80, 80, 80)    # Dark outline for white text readability
 
-            # Calculate the area available for move history
-            available_height = self.undo_section_y - list_start_y - 10
-            max_moves_to_display = int(available_height / line_height)
+        # Column layout
+        col_left_x = self.move_history_rect.x  # Left column start
+        col_width = self.move_history_rect.width // 2
+        col_right_x = col_left_x + col_width  # Right column start
 
-            # Display moves from most recent backwards (up to max that fit)
-            moves_to_show = self.move_history[-max_moves_to_display:] if len(self.move_history) > max_moves_to_display else self.move_history
+        # Separate moves by color
+        black_moves = [entry[0] for entry in self.move_history if entry[1] == BLACK_COLOR]
+        white_moves = [entry[0] for entry in self.move_history if entry[1] == WHITE_COLOR]
 
-            for i, (move_notation, marble_color) in enumerate(moves_to_show):
-                # Position for this move entry
-                entry_y = list_start_y + i * line_height
+        # Starting position for move list (below the header)
+        list_start_y = self.move_history_y + self.move_history_height + 5
+        line_height = 22  # Height for each move entry
 
-                # Draw colored ball indicator
-                ball_x = self.move_history_rect.x + 15
-                ball_y = entry_y + line_height // 2
-                pygame.draw.circle(self.screen, marble_color, (ball_x, ball_y), ball_radius)
+        # Calculate the area available for move history
+        available_height = self.undo_section_y - list_start_y - 10
+        max_moves_to_display = int(available_height / line_height)
 
-                # Draw move notation text
-                move_text = move_font.render(move_notation, True, move_text_color)
-                text_x = ball_x + ball_radius + 8  # Position text after the ball
-                text_y = entry_y + (line_height - move_text.get_height()) // 2
-                self.screen.blit(move_text, (text_x, text_y))
+        # Trim to most recent moves if too many
+        black_to_show = black_moves[-max_moves_to_display:] if len(black_moves) > max_moves_to_display else black_moves
+        white_to_show = white_moves[-max_moves_to_display:] if len(white_moves) > max_moves_to_display else white_moves
+
+        left_padding = 8  # Small padding from the left edge of each column
+
+        # Draw black moves in left column (black font, left-aligned)
+        for i, notation in enumerate(black_to_show):
+            entry_y = list_start_y + i * line_height
+            move_text = move_font.render(notation, True, black_text_color)
+            tx = col_left_x + left_padding
+            ty = entry_y + (line_height - move_text.get_height()) // 2
+            self.screen.blit(move_text, (tx, ty))
+
+        # Draw white moves in right column (white font with outline, left-aligned)
+        for i, notation in enumerate(white_to_show):
+            entry_y = list_start_y + i * line_height
+            tx = col_right_x + left_padding
+            ty = entry_y + (line_height - move_font.get_height()) // 2
+
+            # Draw dark outline by rendering text offset in each direction
+            outline_surf = move_font.render(notation, True, white_outline_color)
+            for dx, dy in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+                self.screen.blit(outline_surf, (tx + dx, ty + dy))
+
+            # Draw white text on top
+            white_surf = move_font.render(notation, True, white_text_color)
+            self.screen.blit(white_surf, (tx, ty))
 
     def _draw_undo_section(self) -> None:
         """Draw the undo section with text and circular button."""
@@ -1341,7 +2105,7 @@ class BoardScene:
 
     def _draw_opponent_score_display(self) -> None:
         """Draw the opponent score display above the board."""
-        from src.constants import CELL_MARGIN, RIM_WIDTH, CELL_RADIUS
+        from src.ui.constants import CELL_MARGIN, RIM_WIDTH, CELL_RADIUS
         import math
 
         # Calculate the top edge of the hexagon board
@@ -1395,7 +2159,7 @@ class BoardScene:
 
     def _draw_player_score_display(self) -> None:
         """Draw the player score display below the board."""
-        from src.constants import CELL_MARGIN, RIM_WIDTH, CELL_RADIUS
+        from src.ui.constants import CELL_MARGIN, RIM_WIDTH, CELL_RADIUS
         import math
 
         # Calculate the bottom edge of the hexagon board
@@ -1599,12 +2363,12 @@ class BoardScene:
         move_limit_font = pygame.font.Font(None, int(26 * scale_factor))
 
         # Computer move limit (below top-right timer) - aligned with timer box
-        computer_move_text = move_limit_font.render(f"Moves: {self.computer_moves_remaining}/{self.max_moves_per_player}", True, self.timer_text_color)
+        computer_move_text = move_limit_font.render(f"Moves: {self.computer_moves_remaining}/{self.player2_move_limit}", True, self.timer_text_color)
         computer_move_rect = computer_move_text.get_rect(topleft=(timer1_box_x, timer1_box_y + timer_box_height + int(8 * scale_factor)))
         self.screen.blit(computer_move_text, computer_move_rect)
 
         # Player move limit (below bottom-right timer) - aligned with timer box
-        player_move_text = move_limit_font.render(f"Moves: {self.player_moves_remaining}/{self.max_moves_per_player}", True, self.timer_text_color)
+        player_move_text = move_limit_font.render(f"Moves: {self.player_moves_remaining}/{self.player1_move_limit}", True, self.timer_text_color)
         player_move_rect = player_move_text.get_rect(topleft=(timer2_box_x, timer2_box_y - move_limit_font.get_height() - int(8 * scale_factor)))
         self.screen.blit(player_move_text, player_move_rect)
 
@@ -1613,6 +2377,7 @@ class BoardScene:
         while self.running:
             self.running = self._handle_events()
             self._update_timers()
+            self._maybe_ai_move()
             self._draw()
             self.clock.tick(FPS)
 
