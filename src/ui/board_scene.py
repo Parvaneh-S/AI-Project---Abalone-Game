@@ -91,8 +91,10 @@ class BoardScene:
         self._last_move_direction: Optional[int] = None       # DIRS key (1..11)
         self._last_move_color: Optional[Tuple[int, int, int]] = None  # color of mover
 
-        # ── AI agent setup (Human vs AI mode) ──────────────────────────────
+        # ── AI agent setup (Human vs AI / AI vs AI modes) ─────────────────
         self.ai_agent: Optional[AIAgent] = None
+        self.ai_agent_black: Optional[AIAgent] = None   # AI vs AI: black agent
+        self.ai_agent_white: Optional[AIAgent] = None   # AI vs AI: white agent
         self._ai_thinking = False        # True while the delay is ticking
         self._ai_think_start: int = 0    # pygame tick when the "thinking" began
         self._ai_think_delay: int = 600  # milliseconds to pause before AI plays
@@ -102,6 +104,9 @@ class BoardScene:
             ai_color = WHITE_COLOR if self.player_color == BLACK_COLOR else BLACK_COLOR
             ai_player_char = 'b' if ai_color == BLACK_COLOR else 'w'
             self.ai_agent = AIAgent(ai_player_char)
+        elif self.game_mode == 1:  # AI vs AI
+            self.ai_agent_black = AIAgent('b')
+            self.ai_agent_white = AIAgent('w')
 
 
         self._setup_back_button()
@@ -519,18 +524,36 @@ class BoardScene:
 
         Called once per frame from the main ``run`` loop.  The delay gives a
         visible pause so the human player can see the transition.
+
+        Handles both Human vs AI (mode 0) and AI vs AI (mode 1).
         """
-        if self.ai_agent is None:
-            return
         if not self.game_started or self.game_paused:
             return
         if self.show_pause_modal or self.show_stop_modal or self.show_timeout_modal or self.show_win_modal:
             return
 
-        # Only act when the current turn colour is the AI's colour
-        is_ai_turn = (self.current_turn_color != self.player_color)
-        if not is_ai_turn:
-            self._ai_thinking = False
+        # Determine which AI agent (if any) should act this turn
+        active_agent: Optional[AIAgent] = None
+
+        if self.game_mode == 0:
+            # Human vs AI: AI acts only on non-human turns
+            if self.ai_agent is None:
+                return
+            if self.current_turn_color == self.player_color:
+                self._ai_thinking = False
+                return
+            active_agent = self.ai_agent
+
+        elif self.game_mode == 1:
+            # AI vs AI: pick the agent matching the current turn colour
+            if self.current_turn_color == BLACK_COLOR:
+                active_agent = self.ai_agent_black
+            else:
+                active_agent = self.ai_agent_white
+            if active_agent is None:
+                return
+        else:
+            # Human vs Human – no AI involvement
             return
 
         # Start the "thinking" timer on the first frame of the AI's turn
@@ -546,7 +569,7 @@ class BoardScene:
 
         # --- Execute AI move ---
         engine_board = self._board_to_engine_state()
-        result = self.ai_agent.select_move(engine_board, self._legal_moves_cache)
+        result = active_agent.select_move(engine_board, self._legal_moves_cache)
         if result is None:
             # No legal moves – should not normally happen
             print("AI has no legal moves!")
@@ -554,7 +577,8 @@ class BoardScene:
             return
 
         move, new_board = result
-        print(f"AI plays: {move.notation()}")
+        color_name = "Black" if self.current_turn_color == BLACK_COLOR else "White"
+        print(f"AI ({color_name}) plays: {move.notation()}")
         self._apply_engine_move(move, new_board)
         self._ai_thinking = False
 
