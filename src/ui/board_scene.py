@@ -70,6 +70,10 @@ class BoardScene:
         self.show_timeout_modal = False  # Whether to show the timeout game-over modal
         self.timeout_loser_color = None  # BLACK_COLOR or WHITE_COLOR – who ran out of time
 
+        # Move-limit exhausted state
+        self.show_move_limit_modal = False  # Whether to show the move-limit game-over modal
+        self.move_limit_loser_color = None  # BLACK_COLOR or WHITE_COLOR – who ran out of moves
+
         # Win condition state (score reaches 6)
         self.show_win_modal = False  # Whether to show the win game-over modal
         self.winner_color = None  # BLACK_COLOR or WHITE_COLOR – who reached 6 points
@@ -529,7 +533,7 @@ class BoardScene:
         """
         if not self.game_started or self.game_paused:
             return
-        if self.show_pause_modal or self.show_stop_modal or self.show_timeout_modal or self.show_win_modal:
+        if self.show_pause_modal or self.show_stop_modal or self.show_timeout_modal or self.show_win_modal or self.show_move_limit_modal:
             return
 
         # Determine which AI agent (if any) should act this turn
@@ -799,17 +803,11 @@ class BoardScene:
         # Apply new board
         self.marble_positions = new_positions
 
-        # Decrement move counts
+        # Decrement move counts (never go below 0)
         if marble_color == self.player_color:
-            self.player_moves_remaining -= 1
-            if self.player_moves_remaining <= 0:
-                self.game_paused = True
-                self.show_pause_modal = True
+            self.player_moves_remaining = max(0, self.player_moves_remaining - 1)
         else:
-            self.computer_moves_remaining -= 1
-            if self.computer_moves_remaining <= 0:
-                self.game_paused = True
-                self.show_pause_modal = True
+            self.computer_moves_remaining = max(0, self.computer_moves_remaining - 1)
 
         # Switch turn
         self.current_turn_color = WHITE_COLOR if self.current_turn_color == BLACK_COLOR else BLACK_COLOR
@@ -821,6 +819,14 @@ class BoardScene:
         self.selected_marbles = []
         self._dest_to_move = {}
         self._recompute_legal_moves()
+
+        # Check if the player whose turn it now is has exhausted their moves
+        if self.current_turn_color == self.player_color:
+            if self.player_moves_remaining <= 0:
+                self._trigger_move_limit_loss(self.current_turn_color)
+        else:
+            if self.computer_moves_remaining <= 0:
+                self._trigger_move_limit_loss(self.current_turn_color)
 
     def _setup_control_buttons(self) -> None:
         """Setup the control buttons (start, pause, stop, reset) in the bottom box."""
@@ -1018,6 +1024,13 @@ class BoardScene:
                 # If timeout modal is showing, handle modal button clicks and block everything else
                 if self.show_timeout_modal:
                     self._handle_timeout_modal_click(event.pos)
+                    if not self.running:
+                        return False
+                    continue
+
+                # If move-limit modal is showing, handle modal button clicks and block everything else
+                if self.show_move_limit_modal:
+                    self._handle_move_limit_modal_click(event.pos)
                     if not self.running:
                         return False
                     continue
@@ -1322,6 +1335,101 @@ class BoardScene:
         self.screen.blit(ok_text, ok_text_rect)
 
     # ------------------------------------------------------------------
+    # Move-limit exhausted (player ran out of moves)
+    # ------------------------------------------------------------------
+
+    def _trigger_move_limit_loss(self, loser_color) -> None:
+        """Stop the game because a player exhausted their move limit.
+
+        Args:
+            loser_color: The color constant (BLACK_COLOR / WHITE_COLOR) of the player who has no moves left.
+        """
+        loser_name = "Black" if loser_color == BLACK_COLOR else "White"
+        print(f"Move limit reached! {loser_name} has no remaining moves and loses.")
+        self.move_limit_loser_color = loser_color
+        self.show_move_limit_modal = True
+        self.game_paused = True
+        self.is_game_timer_running = False
+
+    def _get_move_limit_modal_geometry(self) -> dict:
+        """Get move-limit game-over modal dimensions and button position."""
+        window_w, window_h = self.screen.get_size()
+
+        modal_width = 460
+        modal_height = 260
+        modal_x = (window_w - modal_width) // 2
+        modal_y = (window_h - modal_height) // 2
+
+        button_width = 160
+        button_height = 50
+        button_x = modal_x + (modal_width - button_width) // 2
+        button_y = modal_y + modal_height - 75
+
+        return {
+            'modal_x': modal_x,
+            'modal_y': modal_y,
+            'modal_width': modal_width,
+            'modal_height': modal_height,
+            'ok_button': pygame.Rect(button_x, button_y, button_width, button_height),
+        }
+
+    def _handle_move_limit_modal_click(self, pos: tuple) -> None:
+        """Handle clicks on the move-limit game-over modal."""
+        geom = self._get_move_limit_modal_geometry()
+        if geom['ok_button'].collidepoint(pos):
+            self.show_move_limit_modal = False
+            self.go_back = True
+            self.running = False
+
+    def _draw_move_limit_modal(self) -> None:
+        """Draw the move-limit game-over modal."""
+        window_w, window_h = self.screen.get_size()
+        geom = self._get_move_limit_modal_geometry()
+
+        # Semi-transparent overlay
+        overlay = pygame.Surface((window_w, window_h), pygame.SRCALPHA)
+        overlay.fill((0, 0, 0, 160))
+        self.screen.blit(overlay, (0, 0))
+
+        # Modal background
+        modal_rect = pygame.Rect(geom['modal_x'], geom['modal_y'], geom['modal_width'], geom['modal_height'])
+        pygame.draw.rect(self.screen, (240, 240, 240), modal_rect, border_radius=15)
+        pygame.draw.rect(self.screen, (180, 60, 60), modal_rect, width=4, border_radius=15)
+
+        # Title
+        title_font = pygame.font.Font(None, 60)
+        title_text = title_font.render("Game Over!", True, (180, 60, 60))
+        title_rect = title_text.get_rect(center=(geom['modal_x'] + geom['modal_width'] // 2,
+                                                  geom['modal_y'] + 60))
+        self.screen.blit(title_text, title_rect)
+
+        # Determine loser / winner names
+        loser_name = "Black" if self.move_limit_loser_color == BLACK_COLOR else "White"
+        winner_name = "White" if self.move_limit_loser_color == BLACK_COLOR else "Black"
+
+        # Message
+        msg_font = pygame.font.Font(None, 34)
+        line1 = msg_font.render(f"{loser_name} has no remaining moves!", True, (50, 50, 50))
+        line2 = msg_font.render(f"{winner_name} wins the game!", True, (50, 50, 50))
+        line1_rect = line1.get_rect(center=(geom['modal_x'] + geom['modal_width'] // 2,
+                                             geom['modal_y'] + 130))
+        line2_rect = line2.get_rect(center=(geom['modal_x'] + geom['modal_width'] // 2,
+                                             geom['modal_y'] + 165))
+        self.screen.blit(line1, line1_rect)
+        self.screen.blit(line2, line2_rect)
+
+        # OK button
+        mouse_pos = pygame.mouse.get_pos()
+        ok_color = (184, 202, 176) if geom['ok_button'].collidepoint(mouse_pos) else (164, 182, 156)
+        pygame.draw.rect(self.screen, ok_color, geom['ok_button'], border_radius=10)
+        pygame.draw.rect(self.screen, (255, 255, 255), geom['ok_button'], width=2, border_radius=10)
+
+        ok_font = pygame.font.Font(None, 38)
+        ok_text = ok_font.render("OK", True, (255, 255, 255))
+        ok_text_rect = ok_text.get_rect(center=geom['ok_button'].center)
+        self.screen.blit(ok_text, ok_text_rect)
+
+    # ------------------------------------------------------------------
     # Win condition (score reaches 6)
     # ------------------------------------------------------------------
 
@@ -1431,10 +1539,16 @@ class BoardScene:
             self.show_pause_modal = False
             self.show_win_modal = False
             self.winner_color = None
+            self.show_move_limit_modal = False
+            self.move_limit_loser_color = None
+            self.show_timeout_modal = False
+            self.timeout_loser_color = None
             self.is_game_timer_running = False
             self.total_time = 15 * 60
             self.move_time_computer = 5
             self.move_time_player = 5
+            self.player_moves_remaining = self.player1_move_limit
+            self.computer_moves_remaining = self.player2_move_limit
             self.selected_marbles = []
             self._dest_to_move = {}
             self._legal_moves_cache = []
@@ -1782,6 +1896,10 @@ class BoardScene:
         # Draw timeout game-over modal if showing
         if self.show_timeout_modal:
             self._draw_timeout_modal()
+
+        # Draw move-limit game-over modal if showing
+        if self.show_move_limit_modal:
+            self._draw_move_limit_modal()
 
         # Draw win game-over modal if showing
         if self.show_win_modal:
