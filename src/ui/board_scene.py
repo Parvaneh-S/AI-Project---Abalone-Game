@@ -1854,11 +1854,11 @@ class BoardScene:
                         pygame.draw.circle(self.screen, (255, 215, 0), (x, y), CELL_RADIUS + 4, 3)  # Gold ring
 
 
-                    # If this is a valid destination, draw a small white solid ball inside
+                    # If this is a valid destination, draw a small yellow solid ball inside
                     if cell in valid_destinations:
-                        # Draw a small white solid ball to indicate valid destination
+                        # Draw a small yellow solid ball to indicate valid destination
                         ball_radius = 6  # Small solid ball
-                        pygame.draw.circle(self.screen, (255, 255, 255), (x, y), ball_radius)  # White solid ball
+                        pygame.draw.circle(self.screen, (255, 215, 0), (x, y), ball_radius)  # Yellow solid ball
 
     def _draw_move_history(self) -> None:
         """Draw the move history header text and two-column list of moves (Black | White)."""
