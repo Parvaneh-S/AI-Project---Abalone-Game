@@ -69,6 +69,10 @@ class BoardScene:
         self.show_timeout_modal = False  # Whether to show the timeout game-over modal
         self.timeout_loser_color = None  # BLACK_COLOR or WHITE_COLOR – who ran out of time
 
+        # Win condition state (score reaches 6)
+        self.show_win_modal = False  # Whether to show the win game-over modal
+        self.winner_color = None  # BLACK_COLOR or WHITE_COLOR – who reached 6 points
+
         # Button tooltip tracking
         self.tooltip_text = None  # Current tooltip text to display
         self.tooltip_position = (0, 0)  # Tooltip position
@@ -506,7 +510,7 @@ class BoardScene:
             return
         if not self.game_started or self.game_paused:
             return
-        if self.show_pause_modal or self.show_stop_modal or self.show_timeout_modal:
+        if self.show_pause_modal or self.show_stop_modal or self.show_timeout_modal or self.show_win_modal:
             return
 
         # Only act when the current turn colour is the AI's colour
@@ -676,6 +680,13 @@ class BoardScene:
             self.player_score += pushed_off
         else:
             self.opponent_score += pushed_off
+
+        # Check win condition (first to 6 points wins)
+        if self.player_score >= 6:
+            self._trigger_win(self.player_color)
+        elif self.opponent_score >= 6:
+            opp = WHITE_COLOR if self.player_color == BLACK_COLOR else BLACK_COLOR
+            self._trigger_win(opp)
 
         # Record move in history — store board snapshot for undo
         marble_color = self.current_turn_color
@@ -903,6 +914,13 @@ class BoardScene:
                 # If timeout modal is showing, handle modal button clicks and block everything else
                 if self.show_timeout_modal:
                     self._handle_timeout_modal_click(event.pos)
+                    if not self.running:
+                        return False
+                    continue
+
+                # If win modal is showing, handle modal button clicks and block everything else
+                if self.show_win_modal:
+                    self._handle_win_modal_click(event.pos)
                     if not self.running:
                         return False
                     continue
@@ -1194,6 +1212,104 @@ class BoardScene:
         ok_text_rect = ok_text.get_rect(center=geom['ok_button'].center)
         self.screen.blit(ok_text, ok_text_rect)
 
+    # ------------------------------------------------------------------
+    # Win condition (score reaches 6)
+    # ------------------------------------------------------------------
+
+    def _trigger_win(self, winner_color) -> None:
+        """Stop the game because a player reached 6 points.
+
+        Args:
+            winner_color: The color constant (BLACK_COLOR / WHITE_COLOR) of the winning player.
+        """
+        winner_name = "Black" if winner_color == BLACK_COLOR else "White"
+        print(f"Game Over! {winner_name} wins with 6 points!")
+        self.winner_color = winner_color
+        self.show_win_modal = True
+        self.game_paused = True
+        self.is_game_timer_running = False
+
+    def _get_win_modal_geometry(self) -> dict:
+        """Get win game-over modal dimensions and button position."""
+        window_w, window_h = self.screen.get_size()
+
+        modal_width = 460
+        modal_height = 260
+        modal_x = (window_w - modal_width) // 2
+        modal_y = (window_h - modal_height) // 2
+
+        button_width = 160
+        button_height = 50
+        button_x = modal_x + (modal_width - button_width) // 2
+        button_y = modal_y + modal_height - 75
+
+        return {
+            'modal_x': modal_x,
+            'modal_y': modal_y,
+            'modal_width': modal_width,
+            'modal_height': modal_height,
+            'ok_button': pygame.Rect(button_x, button_y, button_width, button_height),
+        }
+
+    def _handle_win_modal_click(self, pos: tuple) -> None:
+        """Handle clicks on the win game-over modal."""
+        geom = self._get_win_modal_geometry()
+        if geom['ok_button'].collidepoint(pos):
+            # Go back to menu
+            self.show_win_modal = False
+            self.go_back = True
+            self.running = False
+
+    def _draw_win_modal(self) -> None:
+        """Draw the win game-over modal."""
+        window_w, window_h = self.screen.get_size()
+        geom = self._get_win_modal_geometry()
+
+        # Semi-transparent overlay
+        overlay = pygame.Surface((window_w, window_h), pygame.SRCALPHA)
+        overlay.fill((0, 0, 0, 160))
+        self.screen.blit(overlay, (0, 0))
+
+        # Modal background
+        modal_rect = pygame.Rect(geom['modal_x'], geom['modal_y'], geom['modal_width'], geom['modal_height'])
+        pygame.draw.rect(self.screen, (240, 240, 240), modal_rect, border_radius=15)
+        pygame.draw.rect(self.screen, (60, 140, 60), modal_rect, width=4, border_radius=15)
+
+        # Title: "Game Over!"
+        title_font = pygame.font.Font(None, 60)
+        title_text = title_font.render("Game Over!", True, (60, 140, 60))
+        title_rect = title_text.get_rect(center=(geom['modal_x'] + geom['modal_width'] // 2,
+                                                  geom['modal_y'] + 60))
+        self.screen.blit(title_text, title_rect)
+
+        # Determine winner name
+        if self.winner_color == BLACK_COLOR:
+            winner_name = "Black"
+        else:
+            winner_name = "White"
+
+        # Message
+        msg_font = pygame.font.Font(None, 34)
+        line1 = msg_font.render(f"{winner_name} player scored 6 points!", True, (50, 50, 50))
+        line2 = msg_font.render(f"{winner_name} wins the game!", True, (50, 50, 50))
+        line1_rect = line1.get_rect(center=(geom['modal_x'] + geom['modal_width'] // 2,
+                                             geom['modal_y'] + 130))
+        line2_rect = line2.get_rect(center=(geom['modal_x'] + geom['modal_width'] // 2,
+                                             geom['modal_y'] + 165))
+        self.screen.blit(line1, line1_rect)
+        self.screen.blit(line2, line2_rect)
+
+        # OK button
+        mouse_pos = pygame.mouse.get_pos()
+        ok_color = (184, 202, 176) if geom['ok_button'].collidepoint(mouse_pos) else (164, 182, 156)
+        pygame.draw.rect(self.screen, ok_color, geom['ok_button'], border_radius=10)
+        pygame.draw.rect(self.screen, (255, 255, 255), geom['ok_button'], width=2, border_radius=10)
+
+        ok_font = pygame.font.Font(None, 38)
+        ok_text = ok_font.render("OK", True, (255, 255, 255))
+        ok_text_rect = ok_text.get_rect(center=geom['ok_button'].center)
+        self.screen.blit(ok_text, ok_text_rect)
+
     def _reset_game(self) -> None:
         """Reset the game board to initial state."""
         if self.initial_marble_positions:
@@ -1204,6 +1320,8 @@ class BoardScene:
             self.is_human_turn = True
             self.game_paused = False
             self.show_pause_modal = False
+            self.show_win_modal = False
+            self.winner_color = None
             self.is_game_timer_running = False
             self.total_time = 15 * 60
             self.move_time_computer = 5
@@ -1550,6 +1668,10 @@ class BoardScene:
         if self.show_timeout_modal:
             self._draw_timeout_modal()
 
+        # Draw win game-over modal if showing
+        if self.show_win_modal:
+            self._draw_win_modal()
+
         pygame.display.flip()
 
     def _draw_tooltip(self) -> None:
@@ -1763,30 +1885,30 @@ class BoardScene:
         black_to_show = black_moves[-max_moves_to_display:] if len(black_moves) > max_moves_to_display else black_moves
         white_to_show = white_moves[-max_moves_to_display:] if len(white_moves) > max_moves_to_display else white_moves
 
-        # Draw black moves in left column (black font)
+        left_padding = 8  # Small padding from the left edge of each column
+
+        # Draw black moves in left column (black font, left-aligned)
         for i, notation in enumerate(black_to_show):
             entry_y = list_start_y + i * line_height
             move_text = move_font.render(notation, True, black_text_color)
-            tx = col_left_x + (col_width - move_text.get_width()) // 2
+            tx = col_left_x + left_padding
             ty = entry_y + (line_height - move_text.get_height()) // 2
             self.screen.blit(move_text, (tx, ty))
 
-        # Draw white moves in right column (white font with outline for readability)
+        # Draw white moves in right column (white font with outline, left-aligned)
         for i, notation in enumerate(white_to_show):
             entry_y = list_start_y + i * line_height
-            tx_center = col_right_x + col_width // 2
+            tx = col_right_x + left_padding
             ty = entry_y + (line_height - move_font.get_height()) // 2
 
             # Draw dark outline by rendering text offset in each direction
             outline_surf = move_font.render(notation, True, white_outline_color)
-            outline_rect = outline_surf.get_rect(center=(tx_center, ty + move_font.get_height() // 2))
             for dx, dy in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
-                self.screen.blit(outline_surf, (outline_rect.x + dx, outline_rect.y + dy))
+                self.screen.blit(outline_surf, (tx + dx, ty + dy))
 
             # Draw white text on top
             white_surf = move_font.render(notation, True, white_text_color)
-            white_rect = white_surf.get_rect(center=(tx_center, ty + move_font.get_height() // 2))
-            self.screen.blit(white_surf, white_rect)
+            self.screen.blit(white_surf, (tx, ty))
 
     def _draw_undo_section(self) -> None:
         """Draw the undo section with text and circular button."""
