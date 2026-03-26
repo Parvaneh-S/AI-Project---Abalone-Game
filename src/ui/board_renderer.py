@@ -121,9 +121,6 @@ class BoardRenderer:
         top_color = BLACK_COLOR if self.invert_colors else WHITE_COLOR
         bottom_color = WHITE_COLOR if self.invert_colors else BLACK_COLOR
 
-        # Debug output
-        print(f"DEBUG: board_layout={self.board_layout}, invert_colors={self.invert_colors}")
-        print(f"DEBUG: top_color={'BLACK' if top_color == BLACK_COLOR else 'WHITE'}, bottom_color={'BLACK' if bottom_color == BLACK_COLOR else 'WHITE'}")
 
         if self.board_layout == 'standard':
             # Standard layout

@@ -2,9 +2,14 @@
 Board scene for the Abalone game.
 """
 import pygame
-from typing import Optional
+from typing import Optional, List, Dict, Tuple, Set
 from src.ui.constants import FPS, BG_COLOR, CELL_RADIUS, BLACK_COLOR, WHITE_COLOR
 from src.ui.board_renderer import BoardRenderer
+from src.move_engine import (
+    generate_moves, notation_to_axial, axial_to_notation,
+    Move, Board as EngineBoard, Player as EnginePlayer, CELLS as ENGINE_CELLS,
+    DIRS, cell_add, group_cells, CANONICAL_DIRS, OPPOSITE,
+)
 
 
 class BoardScene:
@@ -66,8 +71,13 @@ class BoardScene:
         # Button tooltip tracking
         self.tooltip_text = None  # Current tooltip text to display
         self.tooltip_position = (0, 0)  # Tooltip position
-        # Selection state - persistent selection that shows valid moves
-        self.selected_marble = None  # (row, col) of the currently selected marble
+
+        # Selection state - supports 1, 2, or 3 marble group selection
+        self.selected_marbles: List[Tuple[int, int]] = []  # list of (row, col)
+        # Cached legal moves from move_engine for the current board state & turn
+        self._legal_moves_cache: List[Tuple[Move, EngineBoard]] = []
+        # Maps destination (row, col) → (Move, EngineBoard) for the current selection
+        self._dest_to_move: Dict[Tuple[int, int], Tuple[Move, EngineBoard]] = {}
 
 
         self._setup_back_button()
@@ -355,66 +365,286 @@ class BoardScene:
         # based on the actual board hexagon edges
 
 
+    # Row-start column numbers per row letter, matching the move_engine's
+    # standard Abalone coordinate system.
+    _ROW_START = {'A': 1, 'B': 1, 'C': 1, 'D': 1, 'E': 1,
+                  'F': 2, 'G': 3, 'H': 4, 'I': 5}
+    _ROW_LEN = {'A': 5, 'B': 6, 'C': 7, 'D': 8, 'E': 9,
+                'F': 8, 'G': 7, 'H': 6, 'I': 5}
+
     def _cell_to_notation(self, cell: tuple) -> str:
         """
-        Convert (row, col) to cell notation.
-        Rows are labeled A-I where row 0 (top in display) = I, row 8 (bottom in display) = A.
-        Columns are numbered 1-9 from left to right.
+        Convert (row, col) to standard Abalone cell notation.
+        Display row 0 (top) = I, display row 8 (bottom) = A.
+        Column numbers follow the standard Abalone scheme where each row's
+        leftmost cell has a specific starting column number.
 
-        Based on the standard Abalone notation:
-        - Row I (top, 5 cells): I1, I2, I3, I4, I5
-        - Row E (middle, 9 cells): E1, E2, E3, E4, E5, E6, E7, E8, E9
+        Examples:
+        - Row I (top, 5 cells): I5, I6, I7, I8, I9
+        - Row E (middle, 9 cells): E1, E2, …, E9
         - Row A (bottom, 5 cells): A1, A2, A3, A4, A5
 
         Args:
-            cell: Tuple (row, col) where row 0 is top
+            cell: Tuple (row, col) where row 0 is the top display row
 
         Returns:
-            Cell notation string (e.g., 'I1', 'E5', 'A1')
+            Cell notation string (e.g., 'I5', 'E1', 'A1')
         """
         row, col = cell
-
-        # Row labels: I-A (top to bottom, row 0 = I, row 8 = A)
-        # Invert the row: A is at bottom (row 8), I is at top (row 0)
         row_label = chr(ord('I') - row)
-
-        # Column number: Simply 1-indexed position (left to right)
-        col_number = col + 1
-
+        col_number = self._ROW_START[row_label] + col
         return f"{row_label}{col_number}"
 
     @staticmethod
     def _notation_to_cell(notation: str) -> Optional[tuple[int, int]]:
         """
-        Convert cell notation to (row, col) coordinates.
+        Convert standard Abalone cell notation to (row, col) coordinates.
         Reverse operation of _cell_to_notation.
 
         Args:
-            notation: Cell notation string (e.g., 'I1', 'E5', 'A1')
+            notation: Cell notation string (e.g., 'I5', 'E1', 'A1')
 
         Returns:
             Tuple (row, col) or None if notation is invalid
         """
-        if len(notation) != 2:
+        if len(notation) < 2:
             return None
 
-        row_label = notation[0]
-        col_str = notation[1]
+        row_label = notation[0].upper()
+        col_str = notation[1:]
+
+        _ROW_START = {'A': 1, 'B': 1, 'C': 1, 'D': 1, 'E': 1,
+                      'F': 2, 'G': 3, 'H': 4, 'I': 5}
+        _ROW_LEN = {'A': 5, 'B': 6, 'C': 7, 'D': 8, 'E': 9,
+                    'F': 8, 'G': 7, 'H': 6, 'I': 5}
 
         try:
-            # Convert row label back to row number (I=0, H=1, ..., A=8)
-            row = ord('I') - ord(row_label)
-
-            # Convert column string to column number (1-indexed to 0-indexed)
-            col = int(col_str) - 1
-
-            # Validate ranges
-            if row < 0 or row > 8 or col < 0 or col > 8:
+            if row_label not in _ROW_START:
                 return None
 
+            row = ord('I') - ord(row_label)
+            col_num = int(col_str)
+            start = _ROW_START[row_label]
+            length = _ROW_LEN[row_label]
+
+            if not (start <= col_num < start + length):
+                return None
+
+            col = col_num - start
             return (row, col)
         except (ValueError, TypeError):
             return None
+
+    # ------------------------------------------------------------------
+    # Coordinate / state conversion helpers  (board_scene ↔ move_engine)
+    # ------------------------------------------------------------------
+
+    def _color_to_player(self, color: Tuple[int, int, int]) -> EnginePlayer:
+        """Map a display colour tuple to engine player char ('b' / 'w')."""
+        return 'b' if color == BLACK_COLOR else 'w'
+
+    def _player_to_color(self, player: EnginePlayer) -> Tuple[int, int, int]:
+        """Map engine player char to display colour tuple."""
+        return BLACK_COLOR if player == 'b' else WHITE_COLOR
+
+    def _board_to_engine_state(self) -> EngineBoard:
+        """Convert self.marble_positions → move_engine Board (axial coords)."""
+        engine_board: EngineBoard = {}
+        for (row, col), color in self.marble_positions.items():
+            notation = self._cell_to_notation((row, col))
+            try:
+                axial = notation_to_axial(notation)
+            except ValueError:
+                continue
+            engine_board[axial] = self._color_to_player(color)
+        return engine_board
+
+    def _engine_board_to_positions(self, engine_board: EngineBoard) -> Dict[Tuple[int, int], Tuple[int, int, int]]:
+        """Convert an engine Board → marble_positions dict."""
+        positions: Dict[Tuple[int, int], Tuple[int, int, int]] = {}
+        for axial, player in engine_board.items():
+            notation = axial_to_notation(axial)
+            cell = self._notation_to_cell(notation)
+            if cell is not None:
+                positions[cell] = self._player_to_color(player)
+        return positions
+
+    # ------------------------------------------------------------------
+    # Legal-move cache
+    # ------------------------------------------------------------------
+
+    def _recompute_legal_moves(self) -> None:
+        """Recompute and cache all legal moves for the current turn."""
+        engine_board = self._board_to_engine_state()
+        current_player = self._color_to_player(self.current_turn_color)
+        self._legal_moves_cache = generate_moves(current_player, engine_board)
+
+    # ------------------------------------------------------------------
+    # Multi-marble selection helpers
+    # ------------------------------------------------------------------
+
+    def _cells_form_valid_group(self, cells: List[Tuple[int, int]]) -> bool:
+        """Return True if *cells* (1–3) are collinear and contiguous on the hex grid."""
+        if len(cells) <= 1:
+            return True
+        if len(cells) > 3:
+            return False
+
+        # Convert to notation then axial for direction checking
+        axials = []
+        for c in cells:
+            try:
+                axials.append(notation_to_axial(self._cell_to_notation(c)))
+            except ValueError:
+                return False
+
+        # For 2 marbles, they must be adjacent along one of the 6 hex directions.
+        dq = axials[1][0] - axials[0][0]
+        dr = axials[1][1] - axials[0][1]
+        if (dq, dr) not in DIRS.values() and (-dq, -dr) not in DIRS.values():
+            return False
+
+        if len(cells) == 3:
+            # Third marble must continue the same direction from either end.
+            dq2 = axials[2][0] - axials[1][0]
+            dr2 = axials[2][1] - axials[1][1]
+            if (dq2, dr2) != (dq, dr):
+                # Try the other ordering: maybe axials[2] is before axials[0]
+                dq3 = axials[0][0] - axials[2][0]
+                dr3 = axials[0][1] - axials[2][1]
+                if (dq3, dr3) != (dq, dr) and (-dq3, -dr3) != (dq, dr):
+                    return False
+        return True
+
+    def _recompute_valid_destinations(self) -> None:
+        """Filter legal-moves cache for the current selection and build dest map.
+
+        For each legal move whose marble group matches self.selected_marbles,
+        we determine a *clickable destination cell* and map it to the (Move, Board) pair.
+
+        Destination cell logic:
+        - For an inline move we show the cell just beyond the leading marble.
+        - For a side-step move we show the new positions that are NOT in the group.
+        """
+        self._dest_to_move = {}
+        if not self.selected_marbles:
+            return
+
+        # Build set of notations for current selection
+        sel_notations: Set[str] = set()
+        for c in self.selected_marbles:
+            sel_notations.add(self._cell_to_notation(c))
+
+        for move, new_board in self._legal_moves_cache:
+            # Reconstruct the group of marbles involved in this move
+            move_notations: Set[str] = set()
+
+            if move.b is None:
+                # Single marble inline
+                move_notations.add(move.a)
+            elif move.kind == 'i':
+                # Inline group: trailing=a, leading=b, line direction=d
+                a_ax = notation_to_axial(move.a)
+                d = DIRS[move.d]
+                # Walk from a toward d until we reach b
+                for size in (2, 3):
+                    grp = group_cells(a_ax, d, size)
+                    if axial_to_notation(grp[-1]) == move.b:
+                        for g in grp:
+                            move_notations.add(axial_to_notation(g))
+                        break
+            else:
+                # Side-step: a and b are extremities in sorted order
+                # Line direction is one of CANONICAL_DIRS or its opposite
+                a_ax = notation_to_axial(move.a)
+                b_ax = notation_to_axial(move.b)
+                found = False
+                for ld_num in list(CANONICAL_DIRS) + [OPPOSITE[cd] for cd in CANONICAL_DIRS]:
+                    ld = DIRS[ld_num]
+                    for size in (2, 3):
+                        grp = group_cells(a_ax, ld, size)
+                        if axial_to_notation(grp[-1]) == move.b:
+                            for g in grp:
+                                move_notations.add(axial_to_notation(g))
+                            found = True
+                            break
+                    if found:
+                        break
+
+            if move_notations != sel_notations:
+                continue
+
+            # This move matches our selection — compute destination cell(s)
+            if move.kind == 'i':
+                # Inline: destination is one cell beyond the leading marble
+                d = DIRS[move.d]
+                leading_ax = notation_to_axial(move.b if move.b else move.a)
+                dest_ax = cell_add(leading_ax, d)
+                if dest_ax in ENGINE_CELLS:
+                    dest_cell = self._notation_to_cell(axial_to_notation(dest_ax))
+                    if dest_cell is not None:
+                        self._dest_to_move[dest_cell] = (move, new_board)
+            else:
+                # Side-step: show new positions that are NOT part of the group
+                d = DIRS[move.d]
+                for sel_cell in self.selected_marbles:
+                    sel_ax = notation_to_axial(self._cell_to_notation(sel_cell))
+                    dest_ax = cell_add(sel_ax, d)
+                    if dest_ax in ENGINE_CELLS:
+                        dest_cell = self._notation_to_cell(axial_to_notation(dest_ax))
+                        if dest_cell is not None and dest_cell not in self.selected_marbles:
+                            if dest_cell not in self._dest_to_move:
+                                self._dest_to_move[dest_cell] = (move, new_board)
+
+    def _apply_engine_move(self, move: Move, new_engine_board: EngineBoard) -> None:
+        """Apply a validated engine move: update positions, scores, history, turn."""
+        old_positions = self.marble_positions.copy()
+        new_positions = self._engine_board_to_positions(new_engine_board)
+
+        # Count marbles before and after to detect push-offs
+        def _count(positions, color):
+            return sum(1 for c in positions.values() if c == color)
+
+        opp_color = WHITE_COLOR if self.current_turn_color == BLACK_COLOR else BLACK_COLOR
+        old_opp = _count(old_positions, opp_color)
+        new_opp = _count(new_positions, opp_color)
+        pushed_off = old_opp - new_opp  # number of opponent marbles pushed off
+
+        # Update scores
+        if self.current_turn_color == self.player_color:
+            self.player_score += pushed_off
+        else:
+            self.opponent_score += pushed_off
+
+        # Record move in history — store board snapshot for undo
+        marble_color = self.current_turn_color
+        self.move_history.append((move.notation(), marble_color, old_positions))
+
+        # Apply new board
+        self.marble_positions = new_positions
+
+        # Decrement move counts
+        if marble_color == self.player_color:
+            self.player_moves_remaining -= 1
+            if self.player_moves_remaining <= 0:
+                self.game_paused = True
+                self.show_pause_modal = True
+        else:
+            self.computer_moves_remaining -= 1
+            if self.computer_moves_remaining <= 0:
+                self.game_paused = True
+                self.show_pause_modal = True
+
+        # Switch turn
+        self.current_turn_color = WHITE_COLOR if self.current_turn_color == BLACK_COLOR else BLACK_COLOR
+
+        # Reset timer for next turn
+        self._reset_timer_for_next_turn()
+
+        # Clear selection and recompute legal moves for next player
+        self.selected_marbles = []
+        self._dest_to_move = {}
+        self._recompute_legal_moves()
 
     def _setup_control_buttons(self) -> None:
         """Setup the control buttons (start, pause, stop, reset) in the bottom box."""
@@ -651,59 +881,59 @@ class BoardScene:
                     self._handle_undo_button_click()
                     continue
 
-                # Check if a destination ball was clicked to move the selected marble
-                # Allow move if it's the current player's marble (matching current turn color)
-                if self.game_started and not self.game_paused and self.selected_marble:
+                # Determine whether the human player is allowed to interact
+                # In Human vs AI (mode 0) or AI vs AI (mode 1), only allow
+                # interaction when it is the human player's turn.
+                # In Human vs Human (mode 2), both turns allow interaction.
+                _human_can_interact = (
+                    self.game_mode == 2
+                    or (self.game_mode == 0 and self.current_turn_color == self.player_color)
+                )
+
+                # Check if a destination dot was clicked to execute the move
+                if self.game_started and not self.game_paused and _human_can_interact and self.selected_marbles:
                     clicked_cell = self._get_cell_at_position(event.pos)
-                    if clicked_cell and clicked_cell in self._get_valid_destinations(self.selected_marble):
-                        # Move the selected marble to the clicked destination
-                        from_notation = self._cell_to_notation(self.selected_marble)
-                        to_notation = self._cell_to_notation(clicked_cell)
-                        move_notation = f"{from_notation}{to_notation}"
-                        marble_color = self.marble_positions[self.selected_marble]
-                        self.move_history.append((move_notation, marble_color))
-
-                        self.marble_positions[clicked_cell] = self.marble_positions[self.selected_marble]
-                        del self.marble_positions[self.selected_marble]
-
-                        # Decrement moves for the player whose color moved
-                        if marble_color == self.player_color:
-                            self.player_moves_remaining -= 1
-                            print(f"Player move made! Remaining moves: {self.player_moves_remaining}")
-                            if self.player_moves_remaining <= 0:
-                                print("Player has reached move limit!")
-                                self.game_paused = True
-                                self.show_pause_modal = True
-                        else:
-                            self.computer_moves_remaining -= 1
-                            print(f"Opponent move made! Remaining moves: {self.computer_moves_remaining}")
-                            if self.computer_moves_remaining <= 0:
-                                print("Opponent has reached move limit!")
-                                self.game_paused = True
-                                self.show_pause_modal = True
-
-                        # Switch turns to opponent
-                        self.current_turn_color = WHITE_COLOR if self.current_turn_color == BLACK_COLOR else BLACK_COLOR
-
-                        # Reset timer for next player's turn
-                        self._reset_timer_for_next_turn()
-
-                        self.selected_marble = None
+                    if clicked_cell and clicked_cell in self._dest_to_move:
+                        move, new_board = self._dest_to_move[clicked_cell]
+                        self._apply_engine_move(move, new_board)
                         continue
 
-                # Check if a marble was clicked for dragging (only if game is started and not paused)
-                # Only allow dragging marbles that match the current turn's color
-                if self.game_started and not self.game_paused:
+                # Marble click handling: multi-select up to 3 same-color marbles
+                if self.game_started and not self.game_paused and _human_can_interact:
                     marble_at_pos = self._get_marble_at_position(event.pos)
                     if marble_at_pos and self.marble_positions.get(marble_at_pos) == self.current_turn_color:
-                        # Always start dragging; deselection is resolved on MOUSEBUTTONUP
-                        self.mouse_down_pos = event.pos
-                        self._marble_before_drag = self.selected_marble  # remember prior selection
-                        self.selected_marble = marble_at_pos
-                        self.dragging = True
-                        self.dragged_marble = marble_at_pos
-                        marble_center = self._get_marble_screen_position(marble_at_pos)
-                        self.drag_offset = (event.pos[0] - marble_center[0], event.pos[1] - marble_center[1])
+                        if marble_at_pos in self.selected_marbles:
+                            # Toggle off: deselect this marble
+                            self.selected_marbles.remove(marble_at_pos)
+                            # After removing, remaining marbles must still form a valid group
+                            if not self._cells_form_valid_group(self.selected_marbles):
+                                self.selected_marbles = []
+                            self._recompute_valid_destinations()
+                        else:
+                            # Try adding to the current selection
+                            candidate = self.selected_marbles + [marble_at_pos]
+                            if len(candidate) <= 3 and self._cells_form_valid_group(candidate):
+                                self.selected_marbles = candidate
+                                self._recompute_valid_destinations()
+                            else:
+                                # Start a new selection with just this marble
+                                self.selected_marbles = [marble_at_pos]
+                                self._recompute_valid_destinations()
+
+                        # Also start drag for single marble
+                        if len(self.selected_marbles) == 1 and marble_at_pos in self.selected_marbles:
+                            self.mouse_down_pos = event.pos
+                            self._marble_before_drag = list(self.selected_marbles)
+                            self.dragging = True
+                            self.dragged_marble = marble_at_pos
+                            marble_center = self._get_marble_screen_position(marble_at_pos)
+                            self.drag_offset = (event.pos[0] - marble_center[0], event.pos[1] - marble_center[1])
+                    elif marble_at_pos is None:
+                        # Clicked empty space / non-current-turn marble → deselect
+                        clicked_cell = self._get_cell_at_position(event.pos)
+                        if clicked_cell is None or clicked_cell not in self._dest_to_move:
+                            self.selected_marbles = []
+                            self._dest_to_move = {}
 
             if event.type == pygame.MOUSEBUTTONUP:
                 if self.dragging and self.dragged_marble:
@@ -717,58 +947,21 @@ class BoardScene:
                         was_drag = True
 
                     if not was_drag:
-                        # It was a plain click — deselect only if this marble was already
-                        # selected before the mouse-down (i.e. the user tapped to deselect)
-                        released_on = self._get_marble_at_position(event.pos)
-                        if released_on == self.dragged_marble and self._marble_before_drag == self.dragged_marble:
-                            self.selected_marble = None  # deselect
-                        # else: marble stays selected (new selection on tap)
+                        # Plain click — selection was already handled on MOUSEBUTTONDOWN
                         self.dragging = False
                         self.dragged_marble = None
                         self.drag_offset = (0, 0)
                         self.mouse_down_pos = None
                         self._marble_before_drag = None
                         continue
-                    # Try to drop the marble
+
+                    # Try to drop the marble onto a valid destination
                     drop_cell = self._get_cell_at_position(event.pos)
-                    if drop_cell and self._is_valid_move(self.dragged_marble, drop_cell):
-                        # Record the move in history
-                        from_notation = self._cell_to_notation(self.dragged_marble)
-                        to_notation = self._cell_to_notation(drop_cell)
-                        move_notation = f"{from_notation}{to_notation}"
-                        marble_color = self.marble_positions[self.dragged_marble]
-                        self.move_history.append((move_notation, marble_color))
+                    if drop_cell and drop_cell in self._dest_to_move:
+                        move, new_board = self._dest_to_move[drop_cell]
+                        self._apply_engine_move(move, new_board)
 
-                        # Move the marble
-                        self.marble_positions[drop_cell] = self.marble_positions[self.dragged_marble]
-                        del self.marble_positions[self.dragged_marble]
-
-                        # Decrement moves for the player whose color moved
-                        if marble_color == self.player_color:
-                            self.player_moves_remaining -= 1
-                            print(f"Player move made! Remaining moves: {self.player_moves_remaining}")
-                            if self.player_moves_remaining <= 0:
-                                print("Player has reached move limit!")
-                                self.game_paused = True
-                                self.show_pause_modal = True
-                        else:
-                            self.computer_moves_remaining -= 1
-                            print(f"Opponent move made! Remaining moves: {self.computer_moves_remaining}")
-                            if self.computer_moves_remaining <= 0:
-                                print("Opponent has reached move limit!")
-                                self.game_paused = True
-                                self.show_pause_modal = True
-
-                        # Switch turns to opponent
-                        self.current_turn_color = WHITE_COLOR if self.current_turn_color == BLACK_COLOR else BLACK_COLOR
-
-                        # Reset timer for next player's turn
-                        self._reset_timer_for_next_turn()
-
-                        # Clear selection after a successful move
-                        self.selected_marble = None
-
-                    # Reset dragging state (but keep selection if move wasn't made)
+                    # Reset dragging state (selection persists if move wasn't made)
                     self.dragging = False
                     self.dragged_marble = None
                     self.drag_offset = (0, 0)
@@ -802,6 +995,7 @@ class BoardScene:
             self.is_game_timer_running = True
             self.start_ticks = pygame.time.get_ticks()  # Total game time starts here (never resets)
             self.move_start_ticks = pygame.time.get_ticks()  # Per-move timer starts here (will reset per turn)
+            self._recompute_legal_moves()
             print("Game started!")
         elif self.game_paused:
             # Resume if paused
@@ -953,6 +1147,12 @@ class BoardScene:
             self.total_time = 15 * 60
             self.move_time_computer = 5
             self.move_time_player = 5
+            self.selected_marbles = []
+            self._dest_to_move = {}
+            self._legal_moves_cache = []
+            self.current_turn_color = BLACK_COLOR
+            if self.game_started:
+                self._recompute_legal_moves()
             print("Game reset to initial state!")
 
     def _get_pause_modal_geometry(self) -> dict:
@@ -1047,31 +1247,34 @@ class BoardScene:
             print("Cannot undo while game is paused. Resume first.")
             return
 
-        # Get the last move from history
-        last_move_notation, marble_color = self.move_history.pop()
+        # History entries are (move_notation, marble_color, old_positions_snapshot)
+        entry = self.move_history.pop()
+        if len(entry) == 3:
+            move_notation, marble_color, old_positions = entry
+            # Recompute score delta: count opponent marbles now vs in snapshot
+            opp_color = WHITE_COLOR if marble_color == BLACK_COLOR else BLACK_COLOR
+            old_opp_count = sum(1 for c in old_positions.values() if c == opp_color)
+            cur_opp_count = sum(1 for c in self.marble_positions.values() if c == opp_color)
+            pushed_off = old_opp_count - cur_opp_count  # positive = marbles were pushed off
 
-        # Parse the move notation to get from and to positions
-        # Format: e.g., "I1I2" (from I1 to I2)
-        from_notation = last_move_notation[:2]  # e.g., "I1"
-        to_notation = last_move_notation[2:]    # e.g., "I2"
+            if marble_color == self.player_color:
+                self.player_score = max(0, self.player_score - pushed_off)
+                self.player_moves_remaining += 1
+            else:
+                self.opponent_score = max(0, self.opponent_score - pushed_off)
+                self.computer_moves_remaining += 1
 
-        # Convert notation back to (row, col)
-        from_cell = self._notation_to_cell(from_notation)
-        to_cell = self._notation_to_cell(to_notation)
-
-        if from_cell is None or to_cell is None:
-            print("Error: Could not parse move notation")
-            self.move_history.append((last_move_notation, marble_color))
-            return
-
-        # Move the marble back from to_cell to from_cell
-        if to_cell in self.marble_positions:
-            self.marble_positions[from_cell] = self.marble_positions[to_cell]
-            del self.marble_positions[to_cell]
-            print(f"Undo successful! Reversed move: {last_move_notation}")
+            self.marble_positions = old_positions
+            # Reverse the turn switch
+            self.current_turn_color = marble_color
+            self.selected_marbles = []
+            self._dest_to_move = {}
+            self._recompute_legal_moves()
+            print(f"Undo successful! Reversed move: {move_notation}")
         else:
-            print("Error: Could not undo move - target cell not found")
-            self.move_history.append((last_move_notation, marble_color))
+            # Legacy 2-tuple format fallback
+            move_notation, marble_color = entry[0], entry[1]
+            print(f"Cannot undo legacy move format: {move_notation}")
 
     def _get_marble_at_position(self, pos: tuple[int, int]) -> Optional[tuple[int, int]]:
         """
@@ -1231,7 +1434,8 @@ class BoardScene:
         pygame.draw.rect(self.screen, self.horizontal_box_color, self.horizontal_box_rect)
 
         # Draw turn indicator text in the center of the horizontal box
-        turn_text = self.human_turn_text if self.is_human_turn else self.computer_turn_text
+        is_human = (self.current_turn_color == self.player_color)
+        turn_text = self.human_turn_text if is_human else self.computer_turn_text
         turn_text_rect = turn_text.get_rect(center=self.horizontal_box_rect.center)
         self.screen.blit(turn_text, turn_text_rect)
 
@@ -1429,11 +1633,8 @@ class BoardScene:
         pygame.draw.polygon(self.screen, BORDER_COLOR, outer_hex)
         pygame.draw.polygon(self.screen, BOARD_FILL, inner_hex)
 
-        # Get valid destinations for selected or dragged marble
-        valid_destinations = []
-        marble_to_show_moves = self.dragged_marble if self.dragging else self.selected_marble
-        if marble_to_show_moves:
-            valid_destinations = self._get_valid_destinations(marble_to_show_moves)
+        # Valid destinations come from the move-engine destination map
+        valid_destinations = set(self._dest_to_move.keys())
 
         # Draw all cells and marbles
         for row, row_cells in enumerate(self.board_renderer.cell_centers):
@@ -1453,8 +1654,8 @@ class BoardScene:
                     pygame.draw.circle(self.screen, (120, 120, 120), (x, y), CELL_RADIUS + 1)
                     pygame.draw.circle(self.screen, color, (x, y), CELL_RADIUS)
 
-                    # If this marble is selected (but not being dragged), highlight it
-                    if self.selected_marble == cell and not self.dragging:
+                    # If this marble is in the selected group, highlight it
+                    if cell in self.selected_marbles and not self.dragging:
                         pygame.draw.circle(self.screen, (255, 215, 0), (x, y), CELL_RADIUS + 4, 3)  # Gold ring
 
 
@@ -1489,7 +1690,9 @@ class BoardScene:
             # Display moves from most recent backwards (up to max that fit)
             moves_to_show = self.move_history[-max_moves_to_display:] if len(self.move_history) > max_moves_to_display else self.move_history
 
-            for i, (move_notation, marble_color) in enumerate(moves_to_show):
+            for i, entry in enumerate(moves_to_show):
+                move_notation = entry[0]
+                marble_color = entry[1]
                 # Position for this move entry
                 entry_y = list_start_y + i * line_height
 
