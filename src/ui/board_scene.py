@@ -408,7 +408,11 @@ class BoardScene:
             Cell notation string (e.g., 'I5', 'E1', 'A1')
         """
         row, col = cell
+        if not (0 <= row <= 8):
+            raise ValueError(f"Display row {row} out of range for cell {cell}")
         row_label = chr(ord('I') - row)
+        if row_label not in self._ROW_START:
+            raise ValueError(f"Invalid row label {row_label!r} for cell {cell}")
         col_number = self._ROW_START[row_label] + col
         return f"{row_label}{col_number}"
 
@@ -468,10 +472,10 @@ class BoardScene:
         """Convert self.marble_positions → move_engine Board (axial coords)."""
         engine_board: EngineBoard = {}
         for (row, col), color in self.marble_positions.items():
-            notation = self._cell_to_notation((row, col))
             try:
+                notation = self._cell_to_notation((row, col))
                 axial = notation_to_axial(notation)
-            except ValueError:
+            except (ValueError, KeyError):
                 continue
             engine_board[axial] = self._color_to_player(color)
         return engine_board
@@ -480,7 +484,10 @@ class BoardScene:
         """Convert an engine Board → marble_positions dict."""
         positions: Dict[Tuple[int, int], Tuple[int, int, int]] = {}
         for axial, player in engine_board.items():
-            notation = axial_to_notation(axial)
+            try:
+                notation = axial_to_notation(axial)
+            except (ValueError, KeyError):
+                continue
             cell = self._notation_to_cell(notation)
             if cell is not None:
                 positions[cell] = self._player_to_color(player)
@@ -614,6 +621,8 @@ class BoardScene:
                 # Walk from a toward d until we reach b
                 for size in (2, 3):
                     grp = group_cells(a_ax, d, size)
+                    if any(g not in ENGINE_CELLS for g in grp):
+                        continue
                     if axial_to_notation(grp[-1]) == move.b:
                         for g in grp:
                             move_notations.add(axial_to_notation(g))
@@ -628,6 +637,8 @@ class BoardScene:
                     ld = DIRS[ld_num]
                     for size in (2, 3):
                         grp = group_cells(a_ax, ld, size)
+                        if any(g not in ENGINE_CELLS for g in grp):
+                            continue
                         if axial_to_notation(grp[-1]) == move.b:
                             for g in grp:
                                 move_notations.add(axial_to_notation(g))

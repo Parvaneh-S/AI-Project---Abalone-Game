@@ -103,10 +103,17 @@ def notation_to_axial(coord: str) -> Cell:
 
 
 def axial_to_notation(c: Cell) -> str:
-    """Convert an axial (q, r) cell to board notation (e.g. 'C5')."""
+    """Convert an axial (q, r) cell to board notation (e.g. 'C5').
+
+    Raises ValueError for any out-of-range axial coordinate.
+    """
     q, r = c
     i = RADIUS - r
+    if not (0 <= i <= 8):
+        raise ValueError(f"Axial cell {c} maps to invalid row index {i} (out of A–I range)")
     row = chr(ord('A') + i)
+    if row not in ROW_START:
+        raise ValueError(f"Axial cell {c} maps to invalid row letter {row!r}")
     q_min = max(-RADIUS, -r - RADIUS)
     col = ROW_START[row] + (q - q_min)
     return f"{row}{col}"

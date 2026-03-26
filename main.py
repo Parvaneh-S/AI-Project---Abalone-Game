@@ -5,6 +5,7 @@ At this point, only the UI for Abalone game has been implemented, and it has no 
 This is the main entry point that initializes and runs the game application.
 """
 import sys
+import traceback
 from src.ui.game_app import GameApp
 
 
@@ -14,6 +15,7 @@ def main() -> None:
         app = GameApp()
         app.run()
     except Exception as e:
+        traceback.print_exc()
         print(f"Error running game: {e}", file=sys.stderr)
         sys.exit(1)
 
