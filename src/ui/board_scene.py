@@ -1,6 +1,7 @@
 """
 Board scene for the Abalone game.
 """
+import math
 import pygame
 from typing import Optional, List, Dict, Tuple, Set
 from src.ui.constants import FPS, BG_COLOR, CELL_RADIUS, BLACK_COLOR, WHITE_COLOR
@@ -83,6 +84,12 @@ class BoardScene:
         self._legal_moves_cache: List[Tuple[Move, EngineBoard]] = []
         # Maps destination (row, col) → (Move, EngineBoard) for the current selection
         self._dest_to_move: Dict[Tuple[int, int], Tuple[Move, EngineBoard]] = {}
+
+        # Last-move arrow overlay: show direction arrows on marbles that just moved
+        # until the opponent selects or moves new marbles.
+        self._last_moved_cells: List[Tuple[int, int]] = []   # display (row, col)
+        self._last_move_direction: Optional[int] = None       # DIRS key (1..11)
+        self._last_move_color: Optional[Tuple[int, int, int]] = None  # color of mover
 
         # ── AI agent setup (Human vs AI mode) ──────────────────────────────
         self.ai_agent: Optional[AIAgent] = None
@@ -703,6 +710,68 @@ class BoardScene:
         marble_color = self.current_turn_color
         self.move_history.append((move.notation(), marble_color, old_positions))
 
+        # ── Record last-moved marbles & direction for arrow overlay ──
+        # Determine which display cells were part of this move's group
+        moved_cells: List[Tuple[int, int]] = []
+        if move.b is None:
+            # Single marble inline
+            cell = self._notation_to_cell(move.a)
+            if cell is not None:
+                moved_cells.append(cell)
+        elif move.kind == 'i':
+            # Inline group: trailing=a, leading=b
+            a_ax = notation_to_axial(move.a)
+            d = DIRS[move.d]
+            for size in (2, 3):
+                grp = group_cells(a_ax, d, size)
+                if any(g not in ENGINE_CELLS for g in grp):
+                    continue
+                if axial_to_notation(grp[-1]) == move.b:
+                    for g in grp:
+                        c = self._notation_to_cell(axial_to_notation(g))
+                        if c is not None:
+                            moved_cells.append(c)
+                    break
+        else:
+            # Side-step
+            a_ax = notation_to_axial(move.a)
+            b_ax = notation_to_axial(move.b)
+            found = False
+            for ld_num in list(CANONICAL_DIRS) + [OPPOSITE[cd] for cd in CANONICAL_DIRS]:
+                ld = DIRS[ld_num]
+                for size in (2, 3):
+                    grp = group_cells(a_ax, ld, size)
+                    if any(g not in ENGINE_CELLS for g in grp):
+                        continue
+                    if axial_to_notation(grp[-1]) == move.b:
+                        for g in grp:
+                            c = self._notation_to_cell(axial_to_notation(g))
+                            if c is not None:
+                                moved_cells.append(c)
+                        found = True
+                        break
+                if found:
+                    break
+
+        # The arrows should appear on the NEW positions of the moved marbles
+        # (i.e. after the move). Shift each cell by the move direction.
+        dest_cells: List[Tuple[int, int]] = []
+        d_vec = DIRS[move.d]
+        for mc in moved_cells:
+            try:
+                ax = notation_to_axial(self._cell_to_notation(mc))
+                dest_ax = cell_add(ax, d_vec)
+                if dest_ax in ENGINE_CELLS:
+                    dc = self._notation_to_cell(axial_to_notation(dest_ax))
+                    if dc is not None:
+                        dest_cells.append(dc)
+            except (ValueError, KeyError):
+                pass
+
+        self._last_moved_cells = dest_cells if dest_cells else moved_cells
+        self._last_move_direction = move.d
+        self._last_move_color = marble_color
+
         # Apply new board
         self.marble_positions = new_positions
 
@@ -992,6 +1061,11 @@ class BoardScene:
                 if self.game_started and not self.game_paused and _human_can_interact:
                     marble_at_pos = self._get_marble_at_position(event.pos)
                     if marble_at_pos and self.marble_positions.get(marble_at_pos) == self.current_turn_color:
+                        # Clear last-move arrows when the opponent starts selecting
+                        if self._last_move_color is not None and self._last_move_color != self.current_turn_color:
+                            self._last_moved_cells = []
+                            self._last_move_direction = None
+                            self._last_move_color = None
                         if marble_at_pos in self.selected_marbles:
                             # Toggle off: deselect this marble
                             self.selected_marbles.remove(marble_at_pos)
@@ -1340,6 +1414,9 @@ class BoardScene:
             self.selected_marbles = []
             self._dest_to_move = {}
             self._legal_moves_cache = []
+            self._last_moved_cells = []
+            self._last_move_direction = None
+            self._last_move_color = None
             self.current_turn_color = BLACK_COLOR
             self._ai_thinking = False
             if self.game_started:
@@ -1460,6 +1537,9 @@ class BoardScene:
             self.current_turn_color = marble_color
             self.selected_marbles = []
             self._dest_to_move = {}
+            self._last_moved_cells = []
+            self._last_move_direction = None
+            self._last_move_color = None
             self._recompute_legal_moves()
             print(f"Undo successful! Reversed move: {move_notation}")
         else:
@@ -1859,6 +1939,79 @@ class BoardScene:
                         # Draw a small yellow solid ball to indicate valid destination
                         ball_radius = 6  # Small solid ball
                         pygame.draw.circle(self.screen, (255, 215, 0), (x, y), ball_radius)  # Yellow solid ball
+
+        # ── Draw direction arrows on last-moved marbles ──────────────────
+        if self._last_moved_cells and self._last_move_direction is not None:
+            self._draw_move_arrows()
+
+    def _draw_move_arrows(self) -> None:
+        """Draw direction arrows on the last-moved marbles.
+
+        The arrow colour contrasts with the marble colour so it is always
+        visible (white arrow on black marbles, dark arrow on white marbles).
+        """
+        if not self._last_moved_cells or self._last_move_direction is None:
+            return
+
+        # Map engine direction number to a screen-space angle (radians).
+        # The display grid spaces adjacent rows by DY vertically and offsets
+        # them by 0.5*DX horizontally, giving ~60° diagonal directions.
+        # Screen: 0 = right, π/2 = down (pygame Y-axis points downward).
+        _dir_angles: Dict[int, float] = {
+            1:  -math.pi / 3,              # NE → ~-60°  (up-right)
+            3:   0.0,                       # E  →   0°   (right)
+            5:   math.pi / 3,              # SE → ~+60°  (down-right)
+            7:   math.pi - math.pi / 3,    # SW → ~+120° (down-left)
+            9:   math.pi,                  # W  → 180°   (left)
+            11: -(math.pi - math.pi / 3),  # NW → ~-120° (up-left)
+        }
+
+        angle = _dir_angles.get(self._last_move_direction)
+        if angle is None:
+            return
+
+        # Choose arrow colour to contrast with marble colour
+        if self._last_move_color == BLACK_COLOR:
+            arrow_color = (255, 255, 255)  # white arrow on black marble
+        else:
+            arrow_color = (30, 30, 30)     # dark arrow on white marble
+
+        arrow_len = CELL_RADIUS * 0.55   # length of the arrow shaft
+        head_len = CELL_RADIUS * 0.35    # length of the arrowhead
+        head_half_w = CELL_RADIUS * 0.22 # half-width of the arrowhead base
+
+        cos_a = math.cos(angle)
+        sin_a = math.sin(angle)
+
+        for cell in self._last_moved_cells:
+            # Only draw on cells that currently have a marble
+            if cell not in self.marble_positions:
+                continue
+            cx, cy = self._get_marble_screen_position(cell)
+
+            # Shaft: from centre offset slightly back to a point forward
+            sx = cx - cos_a * arrow_len * 0.4
+            sy = cy - sin_a * arrow_len * 0.4
+            ex = cx + cos_a * arrow_len * 0.6
+            ey = cy + sin_a * arrow_len * 0.6
+
+            # Draw shaft line
+            pygame.draw.line(self.screen, arrow_color,
+                             (int(sx), int(sy)), (int(ex), int(ey)), 3)
+
+            # Arrowhead (filled triangle) at the tip
+            tip_x = ex + cos_a * head_len
+            tip_y = ey + sin_a * head_len
+            # Perpendicular offsets for the two base corners
+            perp_cos = math.cos(angle + math.pi / 2)
+            perp_sin = math.sin(angle + math.pi / 2)
+            base1 = (ex + perp_cos * head_half_w, ey + perp_sin * head_half_w)
+            base2 = (ex - perp_cos * head_half_w, ey - perp_sin * head_half_w)
+            pygame.draw.polygon(self.screen, arrow_color, [
+                (int(tip_x), int(tip_y)),
+                (int(base1[0]), int(base1[1])),
+                (int(base2[0]), int(base2[1])),
+            ])
 
     def _draw_move_history(self) -> None:
         """Draw the move history header text and two-column list of moves (Black | White)."""
