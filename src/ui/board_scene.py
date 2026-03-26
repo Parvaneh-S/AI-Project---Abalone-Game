@@ -1728,46 +1728,65 @@ class BoardScene:
                         pygame.draw.circle(self.screen, (255, 255, 255), (x, y), ball_radius)  # White solid ball
 
     def _draw_move_history(self) -> None:
-        """Draw the move history header text and list of moves with colored indicators."""
+        """Draw the move history header text and two-column list of moves (Black | White)."""
         # Draw header text at the left side of the move history section
         text_x = self.move_history_rect.x + 10  # Small left padding
         text_y = self.move_history_rect.centery - (self.move_history_text.get_height() // 2)
         self.screen.blit(self.move_history_text, (text_x, text_y))
 
-        # Draw move history entries below the header
-        if self.move_history:
-            # Font for move entries
-            move_font = pygame.font.Font(None, 22)
-            move_text_color = (50, 50, 50)  # Dark gray text
-            ball_radius = 5  # Small solid ball indicator
+        # Font for move entries
+        move_font = pygame.font.Font(None, 20)
 
-            # Starting position for move list (below the header)
-            list_start_y = self.move_history_y + self.move_history_height + 5
-            line_height = 25  # Height for each move entry
+        # Font colors: black text for black moves, white text for white moves
+        black_text_color = (15, 15, 15)       # Black font
+        white_text_color = (245, 245, 245)    # White font
+        white_outline_color = (80, 80, 80)    # Dark outline for white text readability
 
-            # Calculate the area available for move history
-            available_height = self.undo_section_y - list_start_y - 10
-            max_moves_to_display = int(available_height / line_height)
+        # Column layout
+        col_left_x = self.move_history_rect.x  # Left column start
+        col_width = self.move_history_rect.width // 2
+        col_right_x = col_left_x + col_width  # Right column start
 
-            # Display moves from most recent backwards (up to max that fit)
-            moves_to_show = self.move_history[-max_moves_to_display:] if len(self.move_history) > max_moves_to_display else self.move_history
+        # Separate moves by color
+        black_moves = [entry[0] for entry in self.move_history if entry[1] == BLACK_COLOR]
+        white_moves = [entry[0] for entry in self.move_history if entry[1] == WHITE_COLOR]
 
-            for i, entry in enumerate(moves_to_show):
-                move_notation = entry[0]
-                marble_color = entry[1]
-                # Position for this move entry
-                entry_y = list_start_y + i * line_height
+        # Starting position for move list (below the header)
+        list_start_y = self.move_history_y + self.move_history_height + 5
+        line_height = 22  # Height for each move entry
 
-                # Draw colored ball indicator
-                ball_x = self.move_history_rect.x + 15
-                ball_y = entry_y + line_height // 2
-                pygame.draw.circle(self.screen, marble_color, (ball_x, ball_y), ball_radius)
+        # Calculate the area available for move history
+        available_height = self.undo_section_y - list_start_y - 10
+        max_moves_to_display = int(available_height / line_height)
 
-                # Draw move notation text
-                move_text = move_font.render(move_notation, True, move_text_color)
-                text_x = ball_x + ball_radius + 8  # Position text after the ball
-                text_y = entry_y + (line_height - move_text.get_height()) // 2
-                self.screen.blit(move_text, (text_x, text_y))
+        # Trim to most recent moves if too many
+        black_to_show = black_moves[-max_moves_to_display:] if len(black_moves) > max_moves_to_display else black_moves
+        white_to_show = white_moves[-max_moves_to_display:] if len(white_moves) > max_moves_to_display else white_moves
+
+        # Draw black moves in left column (black font)
+        for i, notation in enumerate(black_to_show):
+            entry_y = list_start_y + i * line_height
+            move_text = move_font.render(notation, True, black_text_color)
+            tx = col_left_x + (col_width - move_text.get_width()) // 2
+            ty = entry_y + (line_height - move_text.get_height()) // 2
+            self.screen.blit(move_text, (tx, ty))
+
+        # Draw white moves in right column (white font with outline for readability)
+        for i, notation in enumerate(white_to_show):
+            entry_y = list_start_y + i * line_height
+            tx_center = col_right_x + col_width // 2
+            ty = entry_y + (line_height - move_font.get_height()) // 2
+
+            # Draw dark outline by rendering text offset in each direction
+            outline_surf = move_font.render(notation, True, white_outline_color)
+            outline_rect = outline_surf.get_rect(center=(tx_center, ty + move_font.get_height() // 2))
+            for dx, dy in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+                self.screen.blit(outline_surf, (outline_rect.x + dx, outline_rect.y + dy))
+
+            # Draw white text on top
+            white_surf = move_font.render(notation, True, white_text_color)
+            white_rect = white_surf.get_rect(center=(tx_center, ty + move_font.get_height() // 2))
+            self.screen.blit(white_surf, white_rect)
 
     def _draw_undo_section(self) -> None:
         """Draw the undo section with text and circular button."""
