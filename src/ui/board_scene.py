@@ -2,6 +2,7 @@
 Board scene for the Abalone game.
 """
 import math
+import threading
 import pygame
 from typing import Optional, List, Dict, Tuple, Set
 from src.ui.constants import FPS, BG_COLOR, CELL_RADIUS, BLACK_COLOR, WHITE_COLOR
@@ -103,6 +104,11 @@ class BoardScene:
         self._ai_think_start: int = 0    # pygame tick when the "thinking" began
         self._ai_think_delay: int = 600  # milliseconds to pause before AI plays
 
+        # Background thread for AI computation so the UI stays responsive
+        self._ai_thread: Optional[threading.Thread] = None
+        self._ai_result: Optional[Tuple[Move, EngineBoard]] = None
+        self._ai_thread_done = False     # set True by the worker thread when finished
+
         if self.game_mode == 0:  # Human vs AI
             # The AI controls whichever colour the human did NOT pick
             ai_color = WHITE_COLOR if self.player_color == BLACK_COLOR else BLACK_COLOR
@@ -184,8 +190,8 @@ class BoardScene:
         total_elapsed = (pygame.time.get_ticks() - self.start_ticks) // 1000
         self.total_time = max(0, 15 * 60 - total_elapsed)
 
-        # Per-move timer - resets for each player's turn
-        move_elapsed = (pygame.time.get_ticks() - self.move_start_ticks) // 1000
+        # Per-move timer - resets for each player's turn (float for tenths of a second)
+        move_elapsed = (pygame.time.get_ticks() - self.move_start_ticks) / 1000.0
 
         # Store the selected times (time per move, not move limits)
         selected_time_black = 5  # Default
@@ -205,23 +211,23 @@ class BoardScene:
         # Update move timer based on whose turn it is (by color)
         if self.current_turn_color == BLACK_COLOR:
             # Black's turn - show black's time
-            current_time = max(0, selected_time_black - move_elapsed)
+            current_time = max(0.0, selected_time_black - move_elapsed)
             if self.player_color == BLACK_COLOR:
                 self.move_time_player = current_time
             else:
                 self.move_time_computer = current_time
             # Trigger timeout if time ran out
-            if current_time == 0 and not self.show_timeout_modal:
+            if current_time <= 0 and not self.show_timeout_modal:
                 self._trigger_move_timeout(BLACK_COLOR)
         else:
             # White's turn - show white's time
-            current_time = max(0, selected_time_white - move_elapsed)
+            current_time = max(0.0, selected_time_white - move_elapsed)
             if self.player_color == WHITE_COLOR:
                 self.move_time_player = current_time
             else:
                 self.move_time_computer = current_time
             # Trigger timeout if time ran out
-            if current_time == 0 and not self.show_timeout_modal:
+            if current_time <= 0 and not self.show_timeout_modal:
                 self._trigger_move_timeout(WHITE_COLOR)
 
     def _trigger_move_timeout(self, loser_color) -> None:
@@ -526,14 +532,37 @@ class BoardScene:
     def _maybe_ai_move(self) -> None:
         """If it is the AI's turn, start a short "thinking" delay and then play.
 
-        Called once per frame from the main ``run`` loop.  The delay gives a
-        visible pause so the human player can see the transition.
+        Called once per frame from the main ``run`` loop.  The AI computation
+        runs in a background thread so that the game loop (timers, drawing)
+        continues uninterrupted.
 
         Handles both Human vs AI (mode 0) and AI vs AI (mode 1).
         """
         if not self.game_started or self.game_paused:
             return
         if self.show_pause_modal or self.show_stop_modal or self.show_timeout_modal or self.show_win_modal or self.show_move_limit_modal:
+            return
+
+        # ── If a background AI thread has finished, apply its result ──
+        if self._ai_thread is not None and self._ai_thread_done:
+            result = self._ai_result
+            self._ai_thread = None
+            self._ai_result = None
+            self._ai_thread_done = False
+            self._ai_thinking = False
+
+            if result is None:
+                print("AI has no legal moves!")
+                return
+
+            move, new_board = result
+            color_name = "Black" if self.current_turn_color == BLACK_COLOR else "White"
+            print(f"AI ({color_name}) plays: {move.notation()}")
+            self._apply_engine_move(move, new_board)
+            return
+
+        # ── If an AI thread is already running, just wait ──
+        if self._ai_thread is not None:
             return
 
         # Determine which AI agent (if any) should act this turn
@@ -566,25 +595,27 @@ class BoardScene:
             self._ai_think_start = pygame.time.get_ticks()
             return  # wait for the delay to elapse
 
-        # Wait until the delay has elapsed
+        # Wait until the cosmetic delay has elapsed
         elapsed = pygame.time.get_ticks() - self._ai_think_start
         if elapsed < self._ai_think_delay:
             return
 
-        # --- Execute AI move ---
+        # --- Launch AI computation in a background thread ---
         engine_board = self._board_to_engine_state()
-        result = active_agent.select_move(engine_board, self._legal_moves_cache)
-        if result is None:
-            # No legal moves – should not normally happen
-            print("AI has no legal moves!")
-            self._ai_thinking = False
-            return
+        legal_moves = list(self._legal_moves_cache)  # snapshot for thread safety
 
-        move, new_board = result
-        color_name = "Black" if self.current_turn_color == BLACK_COLOR else "White"
-        print(f"AI ({color_name}) plays: {move.notation()}")
-        self._apply_engine_move(move, new_board)
-        self._ai_thinking = False
+        def _worker(agent: AIAgent, board: EngineBoard,
+                    moves: List[Tuple[Move, EngineBoard]]) -> None:
+            self._ai_result = agent.select_move(board, moves)
+            self._ai_thread_done = True
+
+        self._ai_thread_done = False
+        self._ai_result = None
+        self._ai_thread = threading.Thread(
+            target=_worker, args=(active_agent, engine_board, legal_moves),
+            daemon=True,
+        )
+        self._ai_thread.start()
 
     # ------------------------------------------------------------------
     # Multi-marble selection helpers
@@ -2485,7 +2516,7 @@ class BoardScene:
         pygame.draw.rect(self.screen, (0, 0, 0), timer1_box_rect, width=2, border_radius=8)
 
         # Draw only the timer value (5 sec) centered in box
-        timer1_value = value_font.render(f"{self.move_time_computer}s", True, self.timer_text_color)
+        timer1_value = value_font.render(f"{self.move_time_computer:.1f}s", True, self.timer_text_color)
         timer1_value_rect = timer1_value.get_rect(center=timer1_box_rect.center)
         self.screen.blit(timer1_value, timer1_value_rect)
 
@@ -2497,7 +2528,7 @@ class BoardScene:
         pygame.draw.rect(self.screen, (0, 0, 0), timer2_box_rect, width=2, border_radius=8)
 
         # Draw only the timer value (5 sec) centered in box
-        timer2_value = value_font.render(f"{self.move_time_player}s", True, self.timer_text_color)
+        timer2_value = value_font.render(f"{self.move_time_player:.1f}s", True, self.timer_text_color)
         timer2_value_rect = timer2_value.get_rect(center=timer2_box_rect.center)
         self.screen.blit(timer2_value, timer2_value_rect)
 
