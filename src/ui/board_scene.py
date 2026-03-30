@@ -3,6 +3,7 @@ Board scene for the Abalone game.
 """
 import math
 import threading
+import time
 import pygame
 from typing import Optional, List, Dict, Tuple, Set
 from src.ui.constants import FPS, BG_COLOR, CELL_RADIUS, BLACK_COLOR, WHITE_COLOR
@@ -135,7 +136,11 @@ class BoardScene:
         self.initial_marble_positions = self.marble_positions.copy()  # Save initial state
 
         # Move history tracking
-        self.move_history = []  # List of tuples: (move_notation, marble_color)
+        self.move_history = []  # List of tuples: (move_notation, marble_color, old_positions, time_us)
+
+        # Per-move timing (microseconds)
+        self._move_turn_start_us: int = time.perf_counter_ns() // 1000  # µs when current turn began
+        self._last_move_time_us: Optional[int] = None  # µs elapsed for the most recent move
 
         # Score tracking
         self.player_score = 0
@@ -179,6 +184,7 @@ class BoardScene:
         """Reset ONLY the per-move timer when switching to next player's turn."""
         # Reset ONLY the per-move timer, NOT the total game timer
         self.move_start_ticks = pygame.time.get_ticks()
+        self._move_turn_start_us = time.perf_counter_ns() // 1000  # reset µs timer
         self.is_game_timer_running = True
 
     def _update_timers(self) -> None:
@@ -740,6 +746,11 @@ class BoardScene:
 
     def _apply_engine_move(self, move: Move, new_engine_board: EngineBoard) -> None:
         """Apply a validated engine move: update positions, scores, history, turn."""
+        # Measure elapsed time for this move in microseconds
+        move_end_us = time.perf_counter_ns() // 1000
+        elapsed_us = move_end_us - self._move_turn_start_us
+        self._last_move_time_us = elapsed_us
+
         old_positions = self.marble_positions.copy()
         new_positions = self._engine_board_to_positions(new_engine_board)
 
@@ -767,7 +778,7 @@ class BoardScene:
 
         # Record move in history — store board snapshot for undo
         marble_color = self.current_turn_color
-        self.move_history.append((move.notation(), marble_color, old_positions))
+        self.move_history.append((move.notation(), marble_color, old_positions, elapsed_us))
 
         # ── Record last-moved marbles & direction for arrow overlay ──
         # Determine which display cells were part of this move's group
@@ -1227,6 +1238,7 @@ class BoardScene:
             self.is_game_timer_running = True
             self.start_ticks = pygame.time.get_ticks()  # Total game time starts here (never resets)
             self.move_start_ticks = pygame.time.get_ticks()  # Per-move timer starts here (will reset per turn)
+            self._move_turn_start_us = time.perf_counter_ns() // 1000  # µs timer for move duration
             self._recompute_legal_moves()
             print("Game started!")
         elif self.game_paused:
@@ -1236,6 +1248,7 @@ class BoardScene:
             self.is_game_timer_running = True
             # Don't reset start_ticks - total game time keeps running
             self.move_start_ticks = pygame.time.get_ticks()  # Reset per-move timer when resuming
+            self._move_turn_start_us = time.perf_counter_ns() // 1000  # µs timer for move duration
             print("Game resumed!")
         else:
             print("Game is already running!")
@@ -1586,6 +1599,8 @@ class BoardScene:
             self._last_moved_cells = []
             self._last_move_direction = None
             self._last_move_color = None
+            self._last_move_time_us = None
+            self._move_turn_start_us = time.perf_counter_ns() // 1000
             self.current_turn_color = BLACK_COLOR
             self._ai_thinking = False
             if self.game_started:
@@ -1684,10 +1699,10 @@ class BoardScene:
             print("Cannot undo while game is paused. Resume first.")
             return
 
-        # History entries are (move_notation, marble_color, old_positions_snapshot)
+        # History entries are (move_notation, marble_color, old_positions_snapshot, time_us)
         entry = self.move_history.pop()
-        if len(entry) == 3:
-            move_notation, marble_color, old_positions = entry
+        if len(entry) >= 3:
+            move_notation, marble_color, old_positions = entry[0], entry[1], entry[2]
             # Recompute score delta: count opponent marbles now vs in snapshot
             opp_color = WHITE_COLOR if marble_color == BLACK_COLOR else BLACK_COLOR
             old_opp_count = sum(1 for c in old_positions.values() if c == opp_color)
@@ -1709,6 +1724,11 @@ class BoardScene:
             self._last_moved_cells = []
             self._last_move_direction = None
             self._last_move_color = None
+            # Update last move time to the previous move's time (or clear it)
+            if self.move_history and len(self.move_history[-1]) >= 4:
+                self._last_move_time_us = self.move_history[-1][3]
+            else:
+                self._last_move_time_us = None
             self._recompute_legal_moves()
             print(f"Undo successful! Reversed move: {move_notation}")
         else:
@@ -2195,11 +2215,13 @@ class BoardScene:
 
         # Font for move entries
         move_font = pygame.font.Font(None, 20)
+        time_font = pygame.font.Font(None, 16)  # Smaller font for time display
 
         # Font colors: black text for black moves, white text for white moves
         black_text_color = (15, 15, 15)       # Black font
         white_text_color = (245, 245, 245)    # White font
         white_outline_color = (80, 80, 80)    # Dark outline for white text readability
+        time_text_color = (120, 120, 120)     # Gray color for time display
 
         # Column layout
         col_left_x = self.move_history_rect.x  # Left column start
@@ -2210,15 +2232,30 @@ class BoardScene:
         black_moves = [entry[0] for entry in self.move_history if entry[1] == BLACK_COLOR]
         white_moves = [entry[0] for entry in self.move_history if entry[1] == WHITE_COLOR]
 
+        # Determine which column and index the last move belongs to
+        last_move_color = None
+        last_move_idx_black = -1
+        last_move_idx_white = -1
+        if self.move_history and self._last_move_time_us is not None:
+            last_entry = self.move_history[-1]
+            last_move_color = last_entry[1]
+            if last_move_color == BLACK_COLOR:
+                last_move_idx_black = len(black_moves) - 1
+            else:
+                last_move_idx_white = len(white_moves) - 1
+
         # Starting position for move list (below the header)
         list_start_y = self.move_history_y + self.move_history_height + 5
         line_height = 22  # Height for each move entry
+        time_line_extra = 14  # Extra height for the time display below last move
 
         # Calculate the area available for move history
         available_height = self.undo_section_y - list_start_y - 10
         max_moves_to_display = int(available_height / line_height)
 
         # Trim to most recent moves if too many
+        black_offset = max(0, len(black_moves) - max_moves_to_display)
+        white_offset = max(0, len(white_moves) - max_moves_to_display)
         black_to_show = black_moves[-max_moves_to_display:] if len(black_moves) > max_moves_to_display else black_moves
         white_to_show = white_moves[-max_moves_to_display:] if len(white_moves) > max_moves_to_display else white_moves
 
@@ -2231,6 +2268,13 @@ class BoardScene:
             tx = col_left_x + left_padding
             ty = entry_y + (line_height - move_text.get_height()) // 2
             self.screen.blit(move_text, (tx, ty))
+
+            # Show time below the last black move if it was the most recent move
+            actual_idx = black_offset + i
+            if last_move_color == BLACK_COLOR and actual_idx == last_move_idx_black and self._last_move_time_us is not None:
+                time_str = f"{self._last_move_time_us:,} µs"
+                time_surf = time_font.render(time_str, True, black_text_color)
+                self.screen.blit(time_surf, (tx, ty + move_text.get_height() + 1))
 
         # Draw white moves in right column (white font with outline, left-aligned)
         for i, notation in enumerate(white_to_show):
@@ -2246,6 +2290,18 @@ class BoardScene:
             # Draw white text on top
             white_surf = move_font.render(notation, True, white_text_color)
             self.screen.blit(white_surf, (tx, ty))
+
+            # Show time below the last white move if it was the most recent move
+            actual_idx = white_offset + i
+            if last_move_color == WHITE_COLOR and actual_idx == last_move_idx_white and self._last_move_time_us is not None:
+                time_str = f"{self._last_move_time_us:,} µs"
+                # Draw dark outline for readability (same as move notation)
+                time_outline_surf = time_font.render(time_str, True, white_outline_color)
+                for dx, dy in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+                    self.screen.blit(time_outline_surf, (tx + dx, ty + white_surf.get_height() + 1 + dy))
+                # Draw white text on top
+                time_surf = time_font.render(time_str, True, white_text_color)
+                self.screen.blit(time_surf, (tx, ty + white_surf.get_height() + 1))
 
     def _draw_undo_section(self) -> None:
         """Draw the undo section with text and circular button."""
