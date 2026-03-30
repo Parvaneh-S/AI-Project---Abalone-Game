@@ -1254,20 +1254,12 @@ class BoardScene:
             print("Game is already running!")
 
     def _pause_game(self) -> None:
-        """Pause or resume the game."""
+        """Pause the game (resume is handled by the play/start button)."""
         if not self.game_paused:
-            # Pausing the game
+            # Pausing the game — no modal, just pause
             self.game_paused = True
-            self.show_pause_modal = True
             self.is_game_timer_running = False
             print("Game paused!")
-        else:
-            # Resuming the game (called from modal resume button)
-            self.game_paused = False
-            self.show_pause_modal = False
-            self.is_game_timer_running = True
-            self.start_ticks = pygame.time.get_ticks()
-            print("Game resumed!")
 
     def _stop_game(self) -> None:
         """Show stop confirmation modal."""
