@@ -114,10 +114,17 @@ class BoardScene:
             # The AI controls whichever colour the human did NOT pick
             ai_color = WHITE_COLOR if self.player_color == BLACK_COLOR else BLACK_COLOR
             ai_player_char = 'b' if ai_color == BLACK_COLOR else 'w'
-            self.ai_agent = AIAgent(ai_player_char)
+            # Give the AI a time budget that fits within the per-move clock.
+            # Subtract a safety margin (1.2 s) to account for the cosmetic
+            # "thinking" delay (~0.6 s) plus overhead / scheduling jitter.
+            ai_move_time = player2_time if player2_time is not None else 5
+            ai_time_budget = max(0.5, ai_move_time - 1.2)
+            self.ai_agent = AIAgent(ai_player_char, time_limit=ai_time_budget)
         elif self.game_mode == 1:  # AI vs AI
-            self.ai_agent_black = AIAgent('b')
-            self.ai_agent_white = AIAgent('w')
+            p1_time = player1_time if player1_time is not None else 5
+            p2_time = player2_time if player2_time is not None else 5
+            self.ai_agent_black = AIAgent('b', time_limit=max(0.5, p1_time - 1.2))
+            self.ai_agent_white = AIAgent('w', time_limit=max(0.5, p2_time - 1.2))
 
 
         self._setup_back_button()
@@ -1294,7 +1301,7 @@ class BoardScene:
         window_w, window_h = self.screen.get_size()
 
         modal_width = 460
-        modal_height = 260
+        modal_height = 320
         modal_x = (window_w - modal_width) // 2
         modal_y = (window_h - modal_height) // 2
 
@@ -1319,6 +1326,25 @@ class BoardScene:
             self.show_timeout_modal = False
             self.go_back = True
             self.running = False
+
+    def _get_total_times(self) -> Tuple[str, str]:
+        """Compute total time spent by each player from move history.
+
+        Returns:
+            (black_time_str, white_time_str) formatted as human-readable strings.
+        """
+        black_us = sum(entry[3] for entry in self.move_history if entry[1] == BLACK_COLOR and len(entry) >= 4)
+        white_us = sum(entry[3] for entry in self.move_history if entry[1] == WHITE_COLOR and len(entry) >= 4)
+
+        def _fmt(us: int) -> str:
+            seconds = us / 1_000_000
+            if seconds < 60:
+                return f"{seconds:.2f}s"
+            minutes = int(seconds // 60)
+            secs = seconds % 60
+            return f"{minutes}m {secs:.2f}s"
+
+        return _fmt(black_us), _fmt(white_us)
 
     def _draw_timeout_modal(self) -> None:
         """Draw the move-timeout game-over modal."""
@@ -1359,6 +1385,14 @@ class BoardScene:
         self.screen.blit(line1, line1_rect)
         self.screen.blit(line2, line2_rect)
 
+        # Total time per player
+        black_time, white_time = self._get_total_times()
+        time_font = pygame.font.Font(None, 28)
+        time_line = time_font.render(f"Black total: {black_time}  |  White total: {white_time}", True, (80, 80, 80))
+        time_rect = time_line.get_rect(center=(geom['modal_x'] + geom['modal_width'] // 2,
+                                                geom['modal_y'] + 205))
+        self.screen.blit(time_line, time_rect)
+
         # OK button
         mouse_pos = pygame.mouse.get_pos()
         ok_color = (184, 202, 176) if geom['ok_button'].collidepoint(mouse_pos) else (164, 182, 156)
@@ -1392,7 +1426,7 @@ class BoardScene:
         window_w, window_h = self.screen.get_size()
 
         modal_width = 460
-        modal_height = 260
+        modal_height = 320
         modal_x = (window_w - modal_width) // 2
         modal_y = (window_h - modal_height) // 2
 
@@ -1454,6 +1488,14 @@ class BoardScene:
         self.screen.blit(line1, line1_rect)
         self.screen.blit(line2, line2_rect)
 
+        # Total time per player
+        black_time, white_time = self._get_total_times()
+        time_font = pygame.font.Font(None, 28)
+        time_line = time_font.render(f"Black total: {black_time}  |  White total: {white_time}", True, (80, 80, 80))
+        time_rect = time_line.get_rect(center=(geom['modal_x'] + geom['modal_width'] // 2,
+                                                geom['modal_y'] + 205))
+        self.screen.blit(time_line, time_rect)
+
         # OK button
         mouse_pos = pygame.mouse.get_pos()
         ok_color = (184, 202, 176) if geom['ok_button'].collidepoint(mouse_pos) else (164, 182, 156)
@@ -1487,7 +1529,7 @@ class BoardScene:
         window_w, window_h = self.screen.get_size()
 
         modal_width = 460
-        modal_height = 260
+        modal_height = 320
         modal_x = (window_w - modal_width) // 2
         modal_y = (window_h - modal_height) // 2
 
@@ -1551,6 +1593,14 @@ class BoardScene:
                                              geom['modal_y'] + 165))
         self.screen.blit(line1, line1_rect)
         self.screen.blit(line2, line2_rect)
+
+        # Total time per player
+        black_time, white_time = self._get_total_times()
+        time_font = pygame.font.Font(None, 28)
+        time_line = time_font.render(f"Black total: {black_time}  |  White total: {white_time}", True, (80, 80, 80))
+        time_rect = time_line.get_rect(center=(geom['modal_x'] + geom['modal_width'] // 2,
+                                                geom['modal_y'] + 205))
+        self.screen.blit(time_line, time_rect)
 
         # OK button
         mouse_pos = pygame.mouse.get_pos()
@@ -2220,59 +2270,43 @@ class BoardScene:
         col_width = self.move_history_rect.width // 2
         col_right_x = col_left_x + col_width  # Right column start
 
-        # Separate moves by color
-        black_moves = [entry[0] for entry in self.move_history if entry[1] == BLACK_COLOR]
-        white_moves = [entry[0] for entry in self.move_history if entry[1] == WHITE_COLOR]
-
-        # Determine which column and index the last move belongs to
-        last_move_color = None
-        last_move_idx_black = -1
-        last_move_idx_white = -1
-        if self.move_history and self._last_move_time_us is not None:
-            last_entry = self.move_history[-1]
-            last_move_color = last_entry[1]
-            if last_move_color == BLACK_COLOR:
-                last_move_idx_black = len(black_moves) - 1
-            else:
-                last_move_idx_white = len(white_moves) - 1
+        # Separate moves by color, keeping (notation, time_us) pairs
+        black_moves = [(entry[0], entry[3] if len(entry) >= 4 else None) for entry in self.move_history if entry[1] == BLACK_COLOR]
+        white_moves = [(entry[0], entry[3] if len(entry) >= 4 else None) for entry in self.move_history if entry[1] == WHITE_COLOR]
 
         # Starting position for move list (below the header)
         list_start_y = self.move_history_y + self.move_history_height + 5
-        line_height = 22  # Height for each move entry
-        time_line_extra = 14  # Extra height for the time display below last move
+        line_height = 28  # Height for each move entry (includes room for time)
 
         # Calculate the area available for move history
         available_height = self.undo_section_y - list_start_y - 10
         max_moves_to_display = int(available_height / line_height)
 
         # Trim to most recent moves if too many
-        black_offset = max(0, len(black_moves) - max_moves_to_display)
-        white_offset = max(0, len(white_moves) - max_moves_to_display)
         black_to_show = black_moves[-max_moves_to_display:] if len(black_moves) > max_moves_to_display else black_moves
         white_to_show = white_moves[-max_moves_to_display:] if len(white_moves) > max_moves_to_display else white_moves
 
         left_padding = 8  # Small padding from the left edge of each column
 
         # Draw black moves in left column (black font, left-aligned)
-        for i, notation in enumerate(black_to_show):
+        for i, (notation, move_time_us) in enumerate(black_to_show):
             entry_y = list_start_y + i * line_height
             move_text = move_font.render(notation, True, black_text_color)
             tx = col_left_x + left_padding
-            ty = entry_y + (line_height - move_text.get_height()) // 2
+            ty = entry_y + 1
             self.screen.blit(move_text, (tx, ty))
 
-            # Show time below the last black move if it was the most recent move
-            actual_idx = black_offset + i
-            if last_move_color == BLACK_COLOR and actual_idx == last_move_idx_black and self._last_move_time_us is not None:
-                time_str = f"{self._last_move_time_us:,} µs"
+            # Show time below each move (same color as move notation)
+            if move_time_us is not None:
+                time_str = f"{move_time_us:,} µs"
                 time_surf = time_font.render(time_str, True, black_text_color)
                 self.screen.blit(time_surf, (tx, ty + move_text.get_height() + 1))
 
         # Draw white moves in right column (white font with outline, left-aligned)
-        for i, notation in enumerate(white_to_show):
+        for i, (notation, move_time_us) in enumerate(white_to_show):
             entry_y = list_start_y + i * line_height
             tx = col_right_x + left_padding
-            ty = entry_y + (line_height - move_font.get_height()) // 2
+            ty = entry_y + 1
 
             # Draw dark outline by rendering text offset in each direction
             outline_surf = move_font.render(notation, True, white_outline_color)
@@ -2283,10 +2317,9 @@ class BoardScene:
             white_surf = move_font.render(notation, True, white_text_color)
             self.screen.blit(white_surf, (tx, ty))
 
-            # Show time below the last white move if it was the most recent move
-            actual_idx = white_offset + i
-            if last_move_color == WHITE_COLOR and actual_idx == last_move_idx_white and self._last_move_time_us is not None:
-                time_str = f"{self._last_move_time_us:,} µs"
+            # Show time below each move (same color as move notation)
+            if move_time_us is not None:
+                time_str = f"{move_time_us:,} µs"
                 # Draw dark outline for readability (same as move notation)
                 time_outline_surf = time_font.render(time_str, True, white_outline_color)
                 for dx, dy in [(-1, 0), (1, 0), (0, -1), (0, 1)]:

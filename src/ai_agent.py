@@ -1,12 +1,15 @@
 """
 AI Agent for Abalone Game.
 
-Implements a minimax search with alpha-beta pruning and a multi-factor
-heuristic evaluation function for intelligent move selection.
+Implements an iterative-deepening minimax search with alpha-beta pruning
+and a multi-factor heuristic evaluation function for intelligent move
+selection.  A configurable time budget ensures the agent always returns
+a move before the clock expires.
 """
 from __future__ import annotations
 
 import math
+import time
 from typing import List, Optional, Tuple
 
 from src.move_engine import (
@@ -153,25 +156,51 @@ def _move_sort_key(item: Tuple[Move, EngineBoard], player: EnginePlayer,
     return -(capture * 1000 + (0 if move.kind == 'i' else -1))
 
 
+class _SearchTimeout(Exception):
+    """Raised inside the minimax search when the time budget is exhausted."""
+
+
 class AIAgent:
-    """AI agent that uses minimax with alpha-beta pruning to select moves.
+    """AI agent that uses iterative-deepening minimax with alpha-beta pruning.
+
+    The agent keeps deepening its search (depth 1, 2, 3, …) and always
+    retains the best move found so far.  When the time budget is nearly
+    exhausted the search is aborted and the best move from the deepest
+    *completed* iteration is returned.
 
     Attributes
     ----------
     player : EnginePlayer
         'b' or 'w' – the colour this agent controls.
     max_depth : int
-        Maximum search depth for the minimax tree.
+        Hard upper limit on search depth (safeguard).
+    time_limit : float
+        Maximum wall-clock seconds the agent may spend selecting a move.
     """
 
-    def __init__(self, player: EnginePlayer, max_depth: int = 3) -> None:
+    def __init__(self, player: EnginePlayer, max_depth: int = 10,
+                 time_limit: float = 4.5) -> None:
         """
         Args:
             player: The engine player character this agent controls ('b' or 'w').
-            max_depth: How many plies deep to search (default 3).
+            max_depth: Hard upper bound on search depth (default 10).
+            time_limit: Wall-clock seconds the agent is allowed to think.
+                        Defaults to 4.5 s (safe margin for a 5 s move clock).
         """
         self.player = player
         self.max_depth = max_depth
+        self.time_limit = time_limit
+        # Filled at the start of each select_move call
+        self._deadline: float = 0.0
+
+    # ------------------------------------------------------------------
+    # Internal: time check
+    # ------------------------------------------------------------------
+
+    def _check_time(self) -> None:
+        """Raise ``_SearchTimeout`` if the deadline has been reached."""
+        if time.perf_counter() >= self._deadline:
+            raise _SearchTimeout
 
     # ------------------------------------------------------------------
     # Public API
@@ -182,7 +211,11 @@ class AIAgent:
         board: EngineBoard,
         legal_moves: Optional[List[Tuple[Move, EngineBoard]]] = None,
     ) -> Optional[Tuple[Move, EngineBoard]]:
-        """Pick the best move using minimax with alpha-beta pruning.
+        """Pick the best move using iterative-deepening alpha-beta search.
+
+        The agent starts at depth 1 and progressively deepens.  It always
+        keeps the best result from the last **fully completed** depth so
+        that a move is available even when time is very short.
 
         Args:
             board: Current board state (axial-coord dict).
@@ -199,9 +232,45 @@ class AIAgent:
         if not legal_moves:
             return None
 
+        # If there is exactly one legal move, play it immediately.
+        if len(legal_moves) == 1:
+            return legal_moves[0]
+
         # Order moves so alpha-beta prunes more aggressively
         legal_moves.sort(key=lambda m: _move_sort_key(m, self.player, board))
 
+        self._deadline = time.perf_counter() + self.time_limit
+
+        # Always have a fallback: the first move (best by move-ordering heuristic)
+        best_move: Optional[Tuple[Move, EngineBoard]] = legal_moves[0]
+
+        for depth in range(1, self.max_depth + 1):
+            try:
+                candidate = self._search_root(board, legal_moves, depth)
+                if candidate is not None:
+                    best_move = candidate
+            except _SearchTimeout:
+                # Time ran out during this depth – use the result from the
+                # previous (fully completed) depth.
+                break
+
+            # If very little time is left, don't start another iteration
+            if time.perf_counter() >= self._deadline - 0.05:
+                break
+
+        return best_move
+
+    # ------------------------------------------------------------------
+    # Root-level search (one full depth iteration)
+    # ------------------------------------------------------------------
+
+    def _search_root(
+        self,
+        board: EngineBoard,
+        legal_moves: List[Tuple[Move, EngineBoard]],
+        depth: int,
+    ) -> Optional[Tuple[Move, EngineBoard]]:
+        """Run a fixed-depth alpha-beta search and return the best move."""
         best_score = -math.inf
         best_move: Optional[Tuple[Move, EngineBoard]] = None
 
@@ -209,10 +278,10 @@ class AIAgent:
         beta = math.inf
 
         for move, new_board in legal_moves:
-            # After our move it's the opponent's turn → minimising layer
+            self._check_time()
             score = self._minimax(
                 new_board,
-                depth=self.max_depth - 1,
+                depth=depth - 1,
                 alpha=alpha,
                 beta=beta,
                 is_maximising=False,
@@ -238,9 +307,10 @@ class AIAgent:
     ) -> float:
         """Recursive minimax with alpha-beta pruning.
 
-        *is_maximising* is True when it is **this agent's** turn (we want
-        to maximise), False on the opponent's turn (we minimise).
+        Raises ``_SearchTimeout`` when the time budget is exhausted.
         """
+        self._check_time()
+
         # Terminal / depth-limit check
         if depth == 0:
             return evaluate(board, self.player)
@@ -249,7 +319,6 @@ class AIAgent:
         moves = generate_moves(current_player, board)
 
         if not moves:
-            # No legal moves – treat as a very bad / very good outcome
             return -10_000 if is_maximising else 10_000
 
         # Order moves for better pruning
@@ -262,7 +331,7 @@ class AIAgent:
                 max_eval = max(max_eval, eval_score)
                 alpha = max(alpha, eval_score)
                 if beta <= alpha:
-                    break  # β cut-off
+                    break
             return max_eval
         else:
             min_eval = math.inf
@@ -271,6 +340,6 @@ class AIAgent:
                 min_eval = min(min_eval, eval_score)
                 beta = min(beta, eval_score)
                 if beta <= alpha:
-                    break  # α cut-off
+                    break
             return min_eval
 
