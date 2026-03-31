@@ -33,6 +33,27 @@ _W_COHESION     = 3        # Reward per friendly-neighbour pair
 _W_THREAT       = 8        # Bonus per opponent marble that can be pushed off
 _W_EDGE_PENALTY = -4       # Penalty for own marbles sitting on the rim
 
+# ---------------------------------------------------------------------------
+# Time-management constants
+# ---------------------------------------------------------------------------
+_OPENING_MARBLE_COUNT = 14        # Each side starts with 14 marbles
+_OPENING_TIME_FRACTION = 0.25     # Use only 25% of time limit for opening moves
+_FEW_MOVES_THRESHOLD = 10         # Positions with fewer moves are "simple"
+_FEW_MOVES_TIME_FRACTION = 0.50   # Use 50% of time limit for simple positions
+_DOMINANCE_THRESHOLD = 150        # Score gap to consider a move clearly dominant
+_STABLE_DEPTH_COUNT = 3           # Consecutive depths with same best move → stop
+
+
+def _is_opening_position(board: EngineBoard) -> bool:
+    """Return True when no captures have occurred yet (both sides have 14).
+
+    This covers the very first moves regardless of the starting layout
+    (Standard, German Daisy, Belgian Daisy).
+    """
+    black = sum(1 for v in board.values() if v == 'b')
+    white = sum(1 for v in board.values() if v == 'w')
+    return black == _OPENING_MARBLE_COUNT and white == _OPENING_MARBLE_COUNT
+
 
 def _manhattan_from_centre(cell: Cell) -> int:
     """Hex-grid Manhattan distance from the board centre (0, 0)."""
@@ -217,6 +238,14 @@ class AIAgent:
         keeps the best result from the last **fully completed** depth so
         that a move is available even when time is very short.
 
+        **Time-saving heuristics** (tournament-oriented):
+        * Opening positions (no captures yet) use a fraction of the budget.
+        * Positions with few legal moves are searched with a reduced budget.
+        * If one move is clearly dominant (large score gap over the runner-up),
+          the search stops early.
+        * If the same best move is selected for several consecutive depths,
+          the search stops early (the choice is stable).
+
         Args:
             board: Current board state (axial-coord dict).
             legal_moves: Pre-computed legal moves.  If *None* the agent
@@ -239,19 +268,51 @@ class AIAgent:
         # Order moves so alpha-beta prunes more aggressively
         legal_moves.sort(key=lambda m: _move_sort_key(m, self.player, board))
 
-        self._deadline = time.perf_counter() + self.time_limit
+        # ── Adaptive time budget ──────────────────────────────────────────
+        effective_limit = self.time_limit
+
+        is_opening = _is_opening_position(board)
+        if is_opening:
+            effective_limit = self.time_limit * _OPENING_TIME_FRACTION
+        elif len(legal_moves) < _FEW_MOVES_THRESHOLD:
+            effective_limit = self.time_limit * _FEW_MOVES_TIME_FRACTION
+
+        self._deadline = time.perf_counter() + effective_limit
 
         # Always have a fallback: the first move (best by move-ordering heuristic)
         best_move: Optional[Tuple[Move, EngineBoard]] = legal_moves[0]
 
+        # Tracking for early-stop heuristics
+        prev_best_notation: Optional[str] = None
+        stable_count: int = 0
+
         for depth in range(1, self.max_depth + 1):
             try:
-                candidate = self._search_root(board, legal_moves, depth)
+                candidate, best_score, second_best = self._search_root(
+                    board, legal_moves, depth,
+                )
                 if candidate is not None:
                     best_move = candidate
             except _SearchTimeout:
                 # Time ran out during this depth – use the result from the
                 # previous (fully completed) depth.
+                break
+
+            # ── Early-stop: dominant move (large score gap) ───────────────
+            if (second_best > -math.inf
+                    and best_score - second_best >= _DOMINANCE_THRESHOLD
+                    and depth >= 2):
+                break
+
+            # ── Early-stop: stable best move across depths ────────────────
+            current_notation = best_move[0].notation() if best_move else None
+            if current_notation == prev_best_notation:
+                stable_count += 1
+            else:
+                stable_count = 1
+            prev_best_notation = current_notation
+
+            if stable_count >= _STABLE_DEPTH_COUNT and depth >= _STABLE_DEPTH_COUNT:
                 break
 
             # If very little time is left, don't start another iteration
@@ -269,9 +330,18 @@ class AIAgent:
         board: EngineBoard,
         legal_moves: List[Tuple[Move, EngineBoard]],
         depth: int,
-    ) -> Optional[Tuple[Move, EngineBoard]]:
-        """Run a fixed-depth alpha-beta search and return the best move."""
+    ) -> Tuple[Optional[Tuple[Move, EngineBoard]], float, float]:
+        """Run a fixed-depth alpha-beta search and return the best move.
+
+        Returns
+        -------
+        (best_move, best_score, second_best_score)
+            *best_move* is the chosen ``(Move, Board)`` pair (or *None*).
+            *best_score* and *second_best_score* allow the caller to detect
+            dominant moves (large gap ⇒ no need to search deeper).
+        """
         best_score = -math.inf
+        second_best_score = -math.inf
         best_move: Optional[Tuple[Move, EngineBoard]] = None
 
         alpha = -math.inf
@@ -287,11 +357,14 @@ class AIAgent:
                 is_maximising=False,
             )
             if score > best_score:
+                second_best_score = best_score
                 best_score = score
                 best_move = (move, new_board)
+            elif score > second_best_score:
+                second_best_score = score
             alpha = max(alpha, score)
 
-        return best_move
+        return best_move, best_score, second_best_score
 
     # ------------------------------------------------------------------
     # Minimax with alpha-beta pruning
