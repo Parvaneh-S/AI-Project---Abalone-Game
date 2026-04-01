@@ -8,12 +8,12 @@ import pygame
 from typing import Optional, List, Dict, Tuple, Set
 from src.ui.constants import FPS, BG_COLOR, CELL_RADIUS, BLACK_COLOR, WHITE_COLOR
 from src.ui.board_renderer import BoardRenderer
-from src.move_engine import (
+from src.logic.move_engine import (
     generate_moves, notation_to_axial, axial_to_notation,
     Move, Board as EngineBoard, Player as EnginePlayer, CELLS as ENGINE_CELLS,
     DIRS, cell_add, group_cells, CANONICAL_DIRS, OPPOSITE,
 )
-from src.ai_agent import AIAgent
+from src.logic.ai_agent import AIAgent
 
 
 class BoardScene:
