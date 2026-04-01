@@ -4,7 +4,7 @@ Game configuration page for the Abalone game - combines game mode and board layo
 import pygame
 from typing import Optional
 from src.ui.constants import (
-    WINDOW_W, WINDOW_H, FPS,
+    WINDOW_W, FPS,
     LANDING_BG_COLOR
 )
 
