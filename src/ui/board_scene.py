@@ -22,8 +22,8 @@ class BoardScene:
     """
 
     def __init__(self, screen: pygame.Surface, clock: pygame.time.Clock, invert_colors: bool = False, board_layout: str = 'standard',
-                 game_mode: Optional[int] = None, player1_time: Optional[int] = None, player1_move_limit: Optional[int] = None,
-                 player2_time: Optional[int] = None, player2_move_limit: Optional[int] = None):
+                 game_mode: Optional[int] = None, player1_time: Optional[int] = None,
+                 player2_time: Optional[int] = None, move_limit: Optional[int] = None):
         """
         Initialize the board scene.
 
@@ -34,9 +34,8 @@ class BoardScene:
             board_layout: Board layout type ('standard', 'german', or 'belgian')
             game_mode: Game mode (0=Human vs AI, 1=AI vs AI, 2=Human vs Human)
             player1_time: Time per move for player 1 (seconds)
-            player1_move_limit: Move limit for player 1
             player2_time: Time per move for player 2 (seconds)
-            player2_move_limit: Move limit for player 2
+            move_limit: Move limit for both players
         """
         self.screen = screen
         self.clock = clock
@@ -169,12 +168,11 @@ class BoardScene:
         self.is_game_timer_running = False
         self.start_ticks = 0
 
-        # Move limit variables - set from player configuration
-        self.player1_move_limit = player1_move_limit if player1_move_limit is not None else 40
-        self.player2_move_limit = player2_move_limit if player2_move_limit is not None else 40
-        self.max_moves_per_player = self.player1_move_limit  # For compatibility
-        self.player_moves_remaining = self.player1_move_limit
-        self.computer_moves_remaining = self.player2_move_limit
+        # Move limit variables - set from shared player configuration
+        self.move_limit = move_limit if move_limit is not None else 40
+        self.max_moves_per_player = self.move_limit  # For compatibility
+        self.player_moves_remaining = self.move_limit
+        self.computer_moves_remaining = self.move_limit
 
         self._setup_timers()
 
@@ -1384,7 +1382,7 @@ class BoardScene:
         """Get timeout game-over modal dimensions and button position."""
         window_w, window_h = self.screen.get_size()
 
-        modal_width = 460
+        modal_width = 560
         modal_height = 320
         modal_x = (window_w - modal_width) // 2
         modal_y = (window_h - modal_height) // 2
@@ -1415,20 +1413,10 @@ class BoardScene:
         """Compute total time spent by each player from move history.
 
         Returns:
-            (black_time_str, white_time_str) formatted as human-readable strings.
+            (black_time_str, white_time_str) formatted in microseconds.
         """
-        black_us = sum(entry[3] for entry in self.move_history if entry[1] == BLACK_COLOR and len(entry) >= 4)
-        white_us = sum(entry[3] for entry in self.move_history if entry[1] == WHITE_COLOR and len(entry) >= 4)
-
-        def _fmt(us: int) -> str:
-            seconds = us / 1_000_000
-            if seconds < 60:
-                return f"{seconds:.2f}s"
-            minutes = int(seconds // 60)
-            secs = seconds % 60
-            return f"{minutes}m {secs:.2f}s"
-
-        return _fmt(black_us), _fmt(white_us)
+        black_us, white_us = self._get_total_times_us()
+        return f"{black_us:,} µs", f"{white_us:,} µs"
 
     def _draw_timeout_modal(self) -> None:
         """Draw the move-timeout game-over modal."""
@@ -1533,7 +1521,7 @@ class BoardScene:
         """Get move-limit game-over modal dimensions and button position."""
         window_w, window_h = self.screen.get_size()
 
-        modal_width = 460
+        modal_width = 560
         modal_height = 320
         modal_x = (window_w - modal_width) // 2
         modal_y = (window_h - modal_height) // 2
@@ -1648,7 +1636,7 @@ class BoardScene:
         """Get win game-over modal dimensions and button position."""
         window_w, window_h = self.screen.get_size()
 
-        modal_width = 460
+        modal_width = 560
         modal_height = 320
         modal_x = (window_w - modal_width) // 2
         modal_y = (window_h - modal_height) // 2
@@ -1753,8 +1741,8 @@ class BoardScene:
             self.total_time = 15 * 60
             self.move_time_computer = 5
             self.move_time_player = 5
-            self.player_moves_remaining = self.player1_move_limit
-            self.computer_moves_remaining = self.player2_move_limit
+            self.player_moves_remaining = self.move_limit
+            self.computer_moves_remaining = self.move_limit
             self.selected_marbles = []
             self._dest_to_move = {}
             self._legal_moves_cache = []
@@ -2377,13 +2365,11 @@ class BoardScene:
 
         # Font for move entries
         move_font = pygame.font.Font(None, 20)
-        time_font = pygame.font.Font(None, 16)  # Smaller font for time display
 
         # Font colors: black text for black moves, white text for white moves
         black_text_color = (15, 15, 15)       # Black font
         white_text_color = (245, 245, 245)    # White font
         white_outline_color = (80, 80, 80)    # Dark outline for white text readability
-        time_text_color = (120, 120, 120)     # Gray color for time display
 
         # Column layout
         col_left_x = self.move_history_rect.x  # Left column start
@@ -2416,12 +2402,6 @@ class BoardScene:
             ty = entry_y + 1
             self.screen.blit(move_text, (tx, ty))
 
-            # Show time below each move (same color as move notation)
-            if move_time_us is not None:
-                time_str = f"{move_time_us:,} µs"
-                time_surf = time_font.render(time_str, True, black_text_color)
-                self.screen.blit(time_surf, (tx, ty + move_text.get_height() + 1))
-
         # Draw white moves in right column (white font with outline, left-aligned)
         for i, (notation, move_time_us) in enumerate(white_to_show):
             entry_y = list_start_y + i * line_height
@@ -2437,16 +2417,6 @@ class BoardScene:
             white_surf = move_font.render(notation, True, white_text_color)
             self.screen.blit(white_surf, (tx, ty))
 
-            # Show time below each move (same color as move notation)
-            if move_time_us is not None:
-                time_str = f"{move_time_us:,} µs"
-                # Draw dark outline for readability (same as move notation)
-                time_outline_surf = time_font.render(time_str, True, white_outline_color)
-                for dx, dy in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
-                    self.screen.blit(time_outline_surf, (tx + dx, ty + white_surf.get_height() + 1 + dy))
-                # Draw white text on top
-                time_surf = time_font.render(time_str, True, white_text_color)
-                self.screen.blit(time_surf, (tx, ty + white_surf.get_height() + 1))
 
     def _draw_undo_section(self) -> None:
         """Draw the undo section with text and circular button."""
@@ -2737,12 +2707,12 @@ class BoardScene:
         move_limit_font = pygame.font.Font(None, int(26 * scale_factor))
 
         # Computer move limit (below top-right timer) - aligned with timer box
-        computer_move_text = move_limit_font.render(f"Moves: {self.computer_moves_remaining}/{self.player2_move_limit}", True, self.timer_text_color)
+        computer_move_text = move_limit_font.render(f"Moves: {self.computer_moves_remaining}/{self.move_limit}", True, self.timer_text_color)
         computer_move_rect = computer_move_text.get_rect(topleft=(timer1_box_x, timer1_box_y + timer_box_height + int(8 * scale_factor)))
         self.screen.blit(computer_move_text, computer_move_rect)
 
         # Player move limit (below bottom-right timer) - aligned with timer box
-        player_move_text = move_limit_font.render(f"Moves: {self.player_moves_remaining}/{self.player1_move_limit}", True, self.timer_text_color)
+        player_move_text = move_limit_font.render(f"Moves: {self.player_moves_remaining}/{self.move_limit}", True, self.timer_text_color)
         player_move_rect = player_move_text.get_rect(topleft=(timer2_box_x, timer2_box_y - move_limit_font.get_height() - int(8 * scale_factor)))
         self.screen.blit(player_move_text, player_move_rect)
 

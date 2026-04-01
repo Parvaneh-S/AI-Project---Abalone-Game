@@ -74,9 +74,8 @@ class GameApp:
                     board_layout=board_layout,
                     game_mode=config_page.selected_mode,
                     player1_time=config_page.player1_time,
-                    player1_move_limit=config_page.player1_move_limit,
                     player2_time=config_page.player2_time,
-                    player2_move_limit=config_page.player2_move_limit
+                    move_limit=config_page.move_limit
                 )
                 board_scene.run()
 
