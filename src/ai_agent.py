@@ -34,6 +34,13 @@ _W_THREAT       = 8        # Bonus per opponent marble that can be pushed off
 _W_EDGE_PENALTY = -4       # Penalty for own marbles sitting on the rim
 
 # ---------------------------------------------------------------------------
+# Endgame-awareness weights
+# ---------------------------------------------------------------------------
+_W_ENDGAME_SCORE_LEAD = 30   # Bonus per marble-diff unit when few moves remain
+_W_TIME_ADVANTAGE     = 10   # Bonus when we have used less total time than opponent
+_ENDGAME_MOVES_THRESHOLD = 8 # Remaining-moves count that activates endgame strategy
+
+# ---------------------------------------------------------------------------
 # Time-management constants
 # ---------------------------------------------------------------------------
 _OPENING_MARBLE_COUNT = 14        # Each side starts with 14 marbles
@@ -113,10 +120,25 @@ def _count_threats(board: EngineBoard, player: EnginePlayer) -> int:
     return threats
 
 
-def evaluate(board: EngineBoard, player: EnginePlayer) -> float:
+def evaluate(board: EngineBoard, player: EnginePlayer, *,
+             remaining_moves: Optional[int] = None,
+             opp_remaining_moves: Optional[int] = None,
+             my_total_time_us: Optional[int] = None,
+             opp_total_time_us: Optional[int] = None) -> float:
     """Return a heuristic score for *board* from *player*'s perspective.
 
     Higher is better for *player*.
+
+    Optional endgame-context parameters
+    ------------------------------------
+    remaining_moves : moves left for *player* (None = unknown / unlimited).
+    opp_remaining_moves : moves left for the opponent.
+    my_total_time_us : cumulative µs *player* has spent on all moves so far.
+    opp_total_time_us : cumulative µs the opponent has spent.
+
+    When the game is close to ending (few remaining moves), the evaluation
+    puts extra weight on the current marble-count lead (score advantage)
+    and rewards having used less total time (tiebreaker advantage).
     """
     opp = opponent(player)
 
@@ -150,6 +172,36 @@ def evaluate(board: EngineBoard, player: EnginePlayer) -> float:
         + _W_THREAT * threat
         + abs(_W_EDGE_PENALTY) * edge_score
     )
+
+    # ── 6. Endgame awareness ─────────────────────────────────────────────
+    # When the game is nearing its end (few remaining moves for either
+    # player), prioritise holding or extending a score lead and having a
+    # time advantage (the tiebreaker when scores are equal).
+    min_remaining = None
+    if remaining_moves is not None and opp_remaining_moves is not None:
+        min_remaining = min(remaining_moves, opp_remaining_moves)
+    elif remaining_moves is not None:
+        min_remaining = remaining_moves
+    elif opp_remaining_moves is not None:
+        min_remaining = opp_remaining_moves
+
+    if min_remaining is not None and min_remaining <= _ENDGAME_MOVES_THRESHOLD:
+        # Urgency multiplier: as fewer moves remain the bonus grows.
+        # Range: 1.0 (at threshold) → ~2.0 (at 1 move left).
+        urgency = 1.0 + ((_ENDGAME_MOVES_THRESHOLD - min_remaining)
+                         / max(_ENDGAME_MOVES_THRESHOLD, 1))
+
+        # 6a. Amplify the score-lead bonus in the endgame.
+        #     Positive marble_diff = we are ahead → reward.
+        #     Negative marble_diff = we are behind → stronger threat/attack weight.
+        score += _W_ENDGAME_SCORE_LEAD * marble_diff * urgency
+
+        # 6b. Time-advantage bonus (tiebreaker: less time used is better).
+        if my_total_time_us is not None and opp_total_time_us is not None:
+            if opp_total_time_us > my_total_time_us:
+                score += _W_TIME_ADVANTAGE * urgency
+            elif my_total_time_us > opp_total_time_us:
+                score -= _W_TIME_ADVANTAGE * urgency
 
     return score
 
@@ -231,8 +283,23 @@ class AIAgent:
         self,
         board: EngineBoard,
         legal_moves: Optional[List[Tuple[Move, EngineBoard]]] = None,
+        *,
+        remaining_moves: Optional[int] = None,
+        opp_remaining_moves: Optional[int] = None,
+        my_total_time_us: Optional[int] = None,
+        opp_total_time_us: Optional[int] = None,
     ) -> Optional[Tuple[Move, EngineBoard]]:
         """Pick the best move using iterative-deepening alpha-beta search.
+
+        Optional endgame-context kwargs
+        --------------------------------
+        remaining_moves : How many moves this agent still has.
+        opp_remaining_moves : How many moves the opponent still has.
+        my_total_time_us : Cumulative µs this agent has spent so far.
+        opp_total_time_us : Cumulative µs the opponent has spent so far.
+
+        These values are forwarded to the evaluation function so that the
+        AI plays more aggressively or conservatively near the endgame.
 
         The agent starts at depth 1 and progressively deepens.  It always
         keeps the best result from the last **fully completed** depth so
@@ -264,6 +331,12 @@ class AIAgent:
         # If there is exactly one legal move, play it immediately.
         if len(legal_moves) == 1:
             return legal_moves[0]
+
+        # Store endgame context so that _minimax / evaluate can access it.
+        self._remaining_moves = remaining_moves
+        self._opp_remaining_moves = opp_remaining_moves
+        self._my_total_time_us = my_total_time_us
+        self._opp_total_time_us = opp_total_time_us
 
         # Order moves so alpha-beta prunes more aggressively
         legal_moves.sort(key=lambda m: _move_sort_key(m, self.player, board))
@@ -386,7 +459,13 @@ class AIAgent:
 
         # Terminal / depth-limit check
         if depth == 0:
-            return evaluate(board, self.player)
+            return evaluate(
+                board, self.player,
+                remaining_moves=self._remaining_moves,
+                opp_remaining_moves=self._opp_remaining_moves,
+                my_total_time_us=self._my_total_time_us,
+                opp_total_time_us=self._opp_total_time_us,
+            )
 
         current_player = self.player if is_maximising else opponent(self.player)
         moves = generate_moves(current_player, board)

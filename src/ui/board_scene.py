@@ -71,10 +71,14 @@ class BoardScene:
         # Timeout (move time limit exceeded) state
         self.show_timeout_modal = False  # Whether to show the timeout game-over modal
         self.timeout_loser_color = None  # BLACK_COLOR or WHITE_COLOR – who ran out of time
+        self.timeout_winner_color = None  # Winner determined by score comparison
+        self.timeout_reason = ''  # Human-readable reason for the outcome
 
         # Move-limit exhausted state
         self.show_move_limit_modal = False  # Whether to show the move-limit game-over modal
         self.move_limit_loser_color = None  # BLACK_COLOR or WHITE_COLOR – who ran out of moves
+        self.move_limit_winner_color = None  # Winner determined by score comparison
+        self.move_limit_reason = ''  # Human-readable reason for the outcome
 
         # Win condition state (score reaches 6)
         self.show_win_modal = False  # Whether to show the win game-over modal
@@ -246,11 +250,21 @@ class BoardScene:
     def _trigger_move_timeout(self, loser_color) -> None:
         """Stop the game because a player exceeded their per-move time limit.
 
+        The player who ran out of time is *not* automatically the loser.
+        Instead, the winner is determined by score comparison, and if scores
+        are equal, by total time used (less is better).
+
         Args:
             loser_color: The color constant (BLACK_COLOR / WHITE_COLOR) of the player who ran out of time.
         """
         print(f"Move timeout! {'Black' if loser_color == BLACK_COLOR else 'White'} ran out of time.")
         self.timeout_loser_color = loser_color
+
+        # Determine winner by score comparison
+        winner, reason = self._determine_winner_by_score()
+        self.timeout_winner_color = winner
+        self.timeout_reason = reason
+
         self.show_timeout_modal = True
         self.game_paused = True
         self.is_game_timer_running = False
@@ -617,15 +631,46 @@ class BoardScene:
         engine_board = self._board_to_engine_state()
         legal_moves = list(self._legal_moves_cache)  # snapshot for thread safety
 
+        # Compute endgame context for the AI agent
+        black_us, white_us = self._get_total_times_us()
+        if self.current_turn_color == BLACK_COLOR:
+            if self.player_color == BLACK_COLOR:
+                ai_remaining = self.player_moves_remaining
+                opp_remaining = self.computer_moves_remaining
+            else:
+                ai_remaining = self.computer_moves_remaining
+                opp_remaining = self.player_moves_remaining
+            ai_time_us = black_us
+            opp_time_us = white_us
+        else:
+            if self.player_color == WHITE_COLOR:
+                ai_remaining = self.player_moves_remaining
+                opp_remaining = self.computer_moves_remaining
+            else:
+                ai_remaining = self.computer_moves_remaining
+                opp_remaining = self.player_moves_remaining
+            ai_time_us = white_us
+            opp_time_us = black_us
+
         def _worker(agent: AIAgent, board: EngineBoard,
-                    moves: List[Tuple[Move, EngineBoard]]) -> None:
-            self._ai_result = agent.select_move(board, moves)
+                    moves: List[Tuple[Move, EngineBoard]],
+                    rem: int, opp_rem: int,
+                    my_time: int, opp_time: int) -> None:
+            self._ai_result = agent.select_move(
+                board, moves,
+                remaining_moves=rem,
+                opp_remaining_moves=opp_rem,
+                my_total_time_us=my_time,
+                opp_total_time_us=opp_time,
+            )
             self._ai_thread_done = True
 
         self._ai_thread_done = False
         self._ai_result = None
         self._ai_thread = threading.Thread(
-            target=_worker, args=(active_agent, engine_board, legal_moves),
+            target=_worker,
+            args=(active_agent, engine_board, legal_moves,
+                  ai_remaining, opp_remaining, ai_time_us, opp_time_us),
             daemon=True,
         )
         self._ai_thread.start()
@@ -1296,6 +1341,45 @@ class BoardScene:
             self.show_stop_modal = False
             print("Stop cancelled")
 
+    def _get_total_times_us(self) -> Tuple[int, int]:
+        """Return raw total µs spent by (black, white) from move history."""
+        black_us = sum(entry[3] for entry in self.move_history if entry[1] == BLACK_COLOR and len(entry) >= 4)
+        white_us = sum(entry[3] for entry in self.move_history if entry[1] == WHITE_COLOR and len(entry) >= 4)
+        return black_us, white_us
+
+    def _get_scores_by_color(self) -> Tuple[int, int]:
+        """Return (black_score, white_score) regardless of which side is 'player'."""
+        if self.player_color == BLACK_COLOR:
+            return self.player_score, self.opponent_score
+        else:
+            return self.opponent_score, self.player_score
+
+    def _determine_winner_by_score(self) -> Tuple[Optional[Tuple[int, int, int]], str]:
+        """Determine who wins when the game ends by limit / timeout.
+
+        Returns
+        -------
+        (winner_color_or_None, reason_string)
+            winner_color is BLACK_COLOR / WHITE_COLOR, or *None* for a draw.
+            reason_string is a human-readable explanation.
+        """
+        black_score, white_score = self._get_scores_by_color()
+
+        if black_score > white_score:
+            return BLACK_COLOR, f"Black wins with {black_score} vs {white_score} points!"
+        elif white_score > black_score:
+            return WHITE_COLOR, f"White wins with {white_score} vs {black_score} points!"
+
+        # Scores are equal — tiebreaker: less total time wins
+        black_us, white_us = self._get_total_times_us()
+        if black_us < white_us:
+            return BLACK_COLOR, f"Scores tied {black_score}-{white_score}. Black wins by less time used!"
+        elif white_us < black_us:
+            return WHITE_COLOR, f"Scores tied {black_score}-{white_score}. White wins by less time used!"
+
+        # Absolute tie (same score AND same time) — declare a draw
+        return None, f"It's a draw! Scores {black_score}-{white_score}, equal time used."
+
     def _get_timeout_modal_geometry(self) -> dict:
         """Get timeout game-over modal dimensions and button position."""
         window_w, window_h = self.screen.get_size()
@@ -1368,29 +1452,43 @@ class BoardScene:
                                                   geom['modal_y'] + 60))
         self.screen.blit(title_text, title_rect)
 
-        # Determine loser name
-        if self.timeout_loser_color == BLACK_COLOR:
-            loser_name = "Black"
-        else:
-            loser_name = "White"
+        # Determine loser name (who timed out)
+        loser_name = "Black" if self.timeout_loser_color == BLACK_COLOR else "White"
 
-        # Message
+        # Message: who timed out
         msg_font = pygame.font.Font(None, 34)
-        line1 = msg_font.render("Time's up! No move was made in time.", True, (50, 50, 50))
-        line2 = msg_font.render(f"{loser_name} player has lost!", True, (50, 50, 50))
+        line1 = msg_font.render(f"Time's up! {loser_name} ran out of time.", True, (50, 50, 50))
         line1_rect = line1.get_rect(center=(geom['modal_x'] + geom['modal_width'] // 2,
-                                             geom['modal_y'] + 130))
-        line2_rect = line2.get_rect(center=(geom['modal_x'] + geom['modal_width'] // 2,
-                                             geom['modal_y'] + 165))
+                                             geom['modal_y'] + 120))
         self.screen.blit(line1, line1_rect)
+
+        # Winner determined by score (with time tiebreaker)
+        winner_color = getattr(self, 'timeout_winner_color', None)
+        reason = getattr(self, 'timeout_reason', '')
+        result_font = pygame.font.Font(None, 32)
+        if winner_color is not None:
+            winner_name = "Black" if winner_color == BLACK_COLOR else "White"
+            line2 = result_font.render(reason, True, (50, 50, 50))
+        else:
+            line2 = result_font.render(reason, True, (50, 50, 50))
+        line2_rect = line2.get_rect(center=(geom['modal_x'] + geom['modal_width'] // 2,
+                                             geom['modal_y'] + 155))
         self.screen.blit(line2, line2_rect)
+
+        # Score line
+        black_score, white_score = self._get_scores_by_color()
+        score_font = pygame.font.Font(None, 28)
+        score_line = score_font.render(f"Score — Black: {black_score}  |  White: {white_score}", True, (80, 80, 80))
+        score_rect = score_line.get_rect(center=(geom['modal_x'] + geom['modal_width'] // 2,
+                                                  geom['modal_y'] + 190))
+        self.screen.blit(score_line, score_rect)
 
         # Total time per player
         black_time, white_time = self._get_total_times()
         time_font = pygame.font.Font(None, 28)
-        time_line = time_font.render(f"Black total: {black_time}  |  White total: {white_time}", True, (80, 80, 80))
+        time_line = time_font.render(f"Time — Black: {black_time}  |  White: {white_time}", True, (80, 80, 80))
         time_rect = time_line.get_rect(center=(geom['modal_x'] + geom['modal_width'] // 2,
-                                                geom['modal_y'] + 205))
+                                                geom['modal_y'] + 220))
         self.screen.blit(time_line, time_rect)
 
         # OK button
@@ -1411,12 +1509,22 @@ class BoardScene:
     def _trigger_move_limit_loss(self, loser_color) -> None:
         """Stop the game because a player exhausted their move limit.
 
+        The player who ran out of moves is *not* automatically the loser.
+        Instead, the winner is determined by score comparison, and if scores
+        are equal, by total time used (less is better).
+
         Args:
             loser_color: The color constant (BLACK_COLOR / WHITE_COLOR) of the player who has no moves left.
         """
         loser_name = "Black" if loser_color == BLACK_COLOR else "White"
-        print(f"Move limit reached! {loser_name} has no remaining moves and loses.")
+        print(f"Move limit reached! {loser_name} has no remaining moves.")
         self.move_limit_loser_color = loser_color
+
+        # Determine winner by score comparison
+        winner, reason = self._determine_winner_by_score()
+        self.move_limit_winner_color = winner
+        self.move_limit_reason = reason
+
         self.show_move_limit_modal = True
         self.game_paused = True
         self.is_game_timer_running = False
@@ -1473,27 +1581,39 @@ class BoardScene:
                                                   geom['modal_y'] + 60))
         self.screen.blit(title_text, title_rect)
 
-        # Determine loser / winner names
+        # Who ran out of moves
         loser_name = "Black" if self.move_limit_loser_color == BLACK_COLOR else "White"
-        winner_name = "White" if self.move_limit_loser_color == BLACK_COLOR else "Black"
 
-        # Message
+        # Message: who ran out of moves
         msg_font = pygame.font.Font(None, 34)
         line1 = msg_font.render(f"{loser_name} has no remaining moves!", True, (50, 50, 50))
-        line2 = msg_font.render(f"{winner_name} wins the game!", True, (50, 50, 50))
         line1_rect = line1.get_rect(center=(geom['modal_x'] + geom['modal_width'] // 2,
-                                             geom['modal_y'] + 130))
-        line2_rect = line2.get_rect(center=(geom['modal_x'] + geom['modal_width'] // 2,
-                                             geom['modal_y'] + 165))
+                                             geom['modal_y'] + 120))
         self.screen.blit(line1, line1_rect)
+
+        # Winner determined by score (with time tiebreaker)
+        winner_color = getattr(self, 'move_limit_winner_color', None)
+        reason = getattr(self, 'move_limit_reason', '')
+        result_font = pygame.font.Font(None, 32)
+        line2 = result_font.render(reason, True, (50, 50, 50))
+        line2_rect = line2.get_rect(center=(geom['modal_x'] + geom['modal_width'] // 2,
+                                             geom['modal_y'] + 155))
         self.screen.blit(line2, line2_rect)
+
+        # Score line
+        black_score, white_score = self._get_scores_by_color()
+        score_font = pygame.font.Font(None, 28)
+        score_line = score_font.render(f"Score — Black: {black_score}  |  White: {white_score}", True, (80, 80, 80))
+        score_rect = score_line.get_rect(center=(geom['modal_x'] + geom['modal_width'] // 2,
+                                                  geom['modal_y'] + 190))
+        self.screen.blit(score_line, score_rect)
 
         # Total time per player
         black_time, white_time = self._get_total_times()
         time_font = pygame.font.Font(None, 28)
-        time_line = time_font.render(f"Black total: {black_time}  |  White total: {white_time}", True, (80, 80, 80))
+        time_line = time_font.render(f"Time — Black: {black_time}  |  White: {white_time}", True, (80, 80, 80))
         time_rect = time_line.get_rect(center=(geom['modal_x'] + geom['modal_width'] // 2,
-                                                geom['modal_y'] + 205))
+                                                geom['modal_y'] + 220))
         self.screen.blit(time_line, time_rect)
 
         # OK button
