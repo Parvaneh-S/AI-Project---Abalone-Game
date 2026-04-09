@@ -30,7 +30,7 @@ class BoardScene:
         Args:
             screen: Pygame surface to draw on
             clock: Pygame clock for timing
-            invert_colors: If True, swap black and white marble positions
+            invert_colors: If True, the human player controls white marbles
             board_layout: Board layout type ('standard', 'german', or 'belgian')
             game_mode: Game mode (0=Human vs AI, 1=AI vs AI, 2=Human vs Human)
             player1_time: Time per move for player 1 (seconds)
