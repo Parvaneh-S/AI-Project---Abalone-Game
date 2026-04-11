@@ -164,9 +164,15 @@ class BoardScene:
         self._original_move_time_player = self.move_time_player
         self._original_move_time_computer = self.move_time_computer
 
-        self.total_time = 15 * 60  # 15 minutes in seconds (legacy)
+        self.total_time_limit = None  # User-configurable total game time in seconds (None = not set yet)
+        self.total_time = 0  # Current remaining total time (set when user enters value)
         self.is_game_timer_running = False
         self.start_ticks = 0
+
+        # Total game time input field state
+        self.total_time_input_text = ""  # Text currently in the input field
+        self.total_time_input_active = False  # Whether the input field is focused
+        self.total_time_input_confirmed = False  # Whether a valid time has been confirmed
 
         # Move limit variables - set from shared player configuration
         self.move_limit = move_limit if move_limit is not None else 40
@@ -188,6 +194,14 @@ class BoardScene:
         self.total_time_box_height = 80
         self.total_time_box_color = (180, 140, 100)  # Tan/brown color
 
+        # Input field properties for total game time
+        self.total_time_input_font = pygame.font.Font(None, 32)
+        self.total_time_input_color_active = (255, 255, 255)  # White when focused
+        self.total_time_input_color_inactive = (220, 220, 220)  # Light gray when not focused
+        self.total_time_input_border_active = (60, 140, 60)  # Green border when focused
+        self.total_time_input_border_inactive = (100, 100, 100)  # Gray border when not focused
+        self.total_time_input_rect = pygame.Rect(0, 0, 80, 30)  # Will be positioned dynamically
+
 
     def _reset_timer_for_next_turn(self) -> None:
         """Reset ONLY the per-move timer when switching to next player's turn."""
@@ -202,8 +216,12 @@ class BoardScene:
             return
 
         # Total game time - never resets, counts continuously from game start
-        total_elapsed = (pygame.time.get_ticks() - self.start_ticks) // 1000
-        self.total_time = max(0, 15 * 60 - total_elapsed)
+        if self.total_time_limit is not None:
+            total_elapsed = (pygame.time.get_ticks() - self.start_ticks) // 1000
+            self.total_time = max(0, self.total_time_limit - total_elapsed)
+            # If total game time expired, trigger timeout for the current turn's player
+            if self.total_time <= 0 and not self.show_timeout_modal:
+                self._trigger_move_timeout(self.current_turn_color)
 
         # Per-move timer - resets for each player's turn (float for tenths of a second)
         move_elapsed = (pygame.time.get_ticks() - self.move_start_ticks) / 1000.0
@@ -408,16 +426,24 @@ class BoardScene:
         self.computer_turn_text = self.turn_font.render("Computer Turn", True, self.turn_text_color)
 
     def _setup_score_displays(self) -> None:
-        """Setup the score displays above and below the board."""
+        """Setup the score displays above and below the board.
+
+        White is always displayed at the top, Black at the bottom.
+        """
         # Font for score text
         self.score_font = pygame.font.Font(None, 28)
         self.score_text_color = (50, 50, 50)  # Dark gray text
 
-        # Player score label text (below board)
-        self.player_score_label_text = self.score_font.render("Your Score:", True, self.score_text_color)
+        # Top = White, Bottom = Black (always)
+        # White score label text (above board / top)
+        self.white_score_label_text = self.score_font.render("White Score:", True, self.score_text_color)
 
-        # Opponent score label text (above board)
-        self.opponent_score_label_text = self.score_font.render("Opponent Score:", True, self.score_text_color)
+        # Black score label text (below board / bottom)
+        self.black_score_label_text = self.score_font.render("Black Score:", True, self.score_text_color)
+
+        # Keep old names pointing to the new ones for compatibility
+        self.opponent_score_label_text = self.white_score_label_text
+        self.player_score_label_text = self.black_score_label_text
 
         # Circular button properties
         self.score_button_radius = 20  # Radius of circular button (40px diameter)
@@ -428,6 +454,58 @@ class BoardScene:
         # Position will be calculated dynamically in draw methods
         # based on the actual board hexagon edges
 
+
+    # ------------------------------------------------------------------
+    # Black / White display helpers (black = bottom, white = top, always)
+    # ------------------------------------------------------------------
+
+    @property
+    def _black_score(self) -> int:
+        """Score of the black player (points scored BY black, i.e. white marbles pushed off)."""
+        if self.player_color == BLACK_COLOR:
+            return self.player_score
+        else:
+            return self.opponent_score
+
+    @property
+    def _white_score(self) -> int:
+        """Score of the white player (points scored BY white, i.e. black marbles pushed off)."""
+        if self.player_color == WHITE_COLOR:
+            return self.player_score
+        else:
+            return self.opponent_score
+
+    @property
+    def _black_move_time(self) -> float:
+        """Current move timer value for the black player."""
+        if self.player_color == BLACK_COLOR:
+            return self.move_time_player
+        else:
+            return self.move_time_computer
+
+    @property
+    def _white_move_time(self) -> float:
+        """Current move timer value for the white player."""
+        if self.player_color == WHITE_COLOR:
+            return self.move_time_player
+        else:
+            return self.move_time_computer
+
+    @property
+    def _black_moves_remaining(self) -> int:
+        """Moves remaining for the black player."""
+        if self.player_color == BLACK_COLOR:
+            return self.player_moves_remaining
+        else:
+            return self.computer_moves_remaining
+
+    @property
+    def _white_moves_remaining(self) -> int:
+        """Moves remaining for the white player."""
+        if self.player_color == WHITE_COLOR:
+            return self.player_moves_remaining
+        else:
+            return self.computer_moves_remaining
 
     # Row-start column numbers per row letter, matching the move_engine's
     # standard Abalone coordinate system.
@@ -1088,7 +1166,10 @@ class BoardScene:
                 button['hover'] = True
                 # Set tooltip based on button type
                 if button['type'] == 'start':
-                    self.tooltip_text = "Start"
+                    if not self.total_time_input_confirmed and not self.game_started:
+                        self.tooltip_text = "Enter total time first"
+                    else:
+                        self.tooltip_text = "Start"
                 elif button['type'] == 'pause':
                     self.tooltip_text = "Pause"
                 elif button['type'] == 'stop':
@@ -1112,6 +1193,21 @@ class BoardScene:
             if event.type == pygame.VIDEORESIZE:
                 # Window was resized, update positions
                 self._update_positions()
+
+            # Handle keyboard events for total time input field
+            if event.type == pygame.KEYDOWN and self.total_time_input_active:
+                if event.key == pygame.K_RETURN or event.key == pygame.K_KP_ENTER:
+                    # Confirm the entered value
+                    self._confirm_total_time_input()
+                elif event.key == pygame.K_BACKSPACE:
+                    self.total_time_input_text = self.total_time_input_text[:-1]
+                elif event.key == pygame.K_ESCAPE:
+                    self.total_time_input_active = False
+                else:
+                    # Only allow digits
+                    if event.unicode.isdigit() and len(self.total_time_input_text) < 4:
+                        self.total_time_input_text += event.unicode
+
             if event.type == pygame.MOUSEBUTTONDOWN:
                 # If timeout modal is showing, handle modal button clicks and block everything else
                 if self.show_timeout_modal:
@@ -1154,6 +1250,18 @@ class BoardScene:
                 if self.back_button_rect.collidepoint(event.pos):
                     self.go_back = True
                     return False
+
+                # Check if total time input field was clicked (only when not yet confirmed)
+                if not self.total_time_input_confirmed and self.total_time_input_rect.collidepoint(event.pos):
+                    self.total_time_input_active = True
+                    continue
+                else:
+                    # Clicked outside the input field – deactivate it
+                    if self.total_time_input_active:
+                        self.total_time_input_active = False
+                        # Auto-confirm if there is valid text
+                        if self.total_time_input_text.strip():
+                            self._confirm_total_time_input()
 
                 # Check if control buttons were clicked
                 for button in self.control_buttons:
@@ -1279,9 +1387,31 @@ class BoardScene:
         elif button_type == 'reset':
             self._reset_game()
 
+    def _confirm_total_time_input(self) -> None:
+        """Validate and confirm the total game time entered by the user."""
+        text = self.total_time_input_text.strip()
+        if not text:
+            return
+        try:
+            minutes = int(text)
+            if minutes <= 0:
+                print("Total game time must be a positive number!")
+                return
+            self.total_time_limit = minutes * 60  # Convert minutes to seconds
+            self.total_time = self.total_time_limit
+            self.total_time_input_confirmed = True
+            self.total_time_input_active = False
+            print(f"Total game time set to {minutes} minutes ({self.total_time_limit} seconds)")
+        except ValueError:
+            print("Invalid input for total game time!")
+
     def _start_game(self) -> None:
         """Start or resume the game."""
         if not self.game_started:
+            # Cannot start unless the user has entered a valid total game time
+            if not self.total_time_input_confirmed:
+                print("Cannot start: Please enter a total game time first!")
+                return
             # Start the game
             self.game_started = True
             self.game_paused = False
@@ -1738,7 +1868,12 @@ class BoardScene:
             self.show_timeout_modal = False
             self.timeout_loser_color = None
             self.is_game_timer_running = False
-            self.total_time = 15 * 60
+            self.total_time = 0
+            self.total_time_input_text = ""
+            self.total_time_input_active = False
+            self.total_time_input_confirmed = False
+            self.total_time_limit = None
+            self.game_started = False
             self.move_time_computer = 5
             self.move_time_player = 5
             self.player_moves_remaining = self.move_limit
@@ -2030,9 +2165,9 @@ class BoardScene:
         # Draw the board with current marble positions
         self._draw_board_and_marbles()
 
-        # Draw the score displays above and below the board
-        self._draw_opponent_score_display()  # Above board
-        self._draw_player_score_display()    # Below board
+        # Draw the score displays above and below the board (white=top, black=bottom)
+        self._draw_opponent_score_display()  # White score (top)
+        self._draw_player_score_display()    # Black score (bottom)
 
         # Draw timers
         self._draw_timers()
@@ -2448,7 +2583,7 @@ class BoardScene:
             self.screen.blit(self.undo_icon_scaled, icon_rect)
 
     def _draw_opponent_score_display(self) -> None:
-        """Draw the opponent score display above the board."""
+        """Draw the white player score display above the board (top = white, always)."""
         from src.ui.constants import CELL_MARGIN, RIM_WIDTH, CELL_RADIUS
         import math
 
@@ -2470,7 +2605,7 @@ class BoardScene:
         score_display_bottom_y = int(hexagon_top_y) - gap_above_hexagon
 
         # Calculate score display y (top of the text)
-        score_display_y = score_display_bottom_y - self.opponent_score_label_text.get_height()
+        score_display_y = score_display_bottom_y - self.white_score_label_text.get_height()
 
         # Calculate horizontal center based on board center
         window_w, _ = self.screen.get_size()
@@ -2479,30 +2614,30 @@ class BoardScene:
 
         # Calculate positions for text and button
         text_button_spacing = 15  # Space between text and button
-        total_width = self.opponent_score_label_text.get_width() + text_button_spacing + (self.score_button_radius * 2)
+        total_width = self.white_score_label_text.get_width() + text_button_spacing + (self.score_button_radius * 2)
 
         # Center the entire score display
         start_x = board_center_x - (total_width // 2)
         text_x = start_x
-        button_center_x = start_x + self.opponent_score_label_text.get_width() + text_button_spacing + self.score_button_radius
+        button_center_x = start_x + self.white_score_label_text.get_width() + text_button_spacing + self.score_button_radius
 
-        # Draw "Opponent Score:" text
-        self.screen.blit(self.opponent_score_label_text, (text_x, score_display_y))
+        # Draw "White Score:" text
+        self.screen.blit(self.white_score_label_text, (text_x, score_display_y))
 
         # Draw circular button with score
-        button_center = (button_center_x, score_display_y + self.opponent_score_label_text.get_height() // 2)
+        button_center = (button_center_x, score_display_y + self.white_score_label_text.get_height() // 2)
 
         # Draw white circle with gray border
         pygame.draw.circle(self.screen, self.score_button_bg_color, button_center, self.score_button_radius)
         pygame.draw.circle(self.screen, self.score_button_border_color, button_center, self.score_button_radius, 2)
 
         # Draw score text in the center of the circle
-        score_text = self.score_font.render(str(self.opponent_score), True, self.score_button_text_color)
+        score_text = self.score_font.render(str(self._white_score), True, self.score_button_text_color)
         score_text_rect = score_text.get_rect(center=button_center)
         self.screen.blit(score_text, score_text_rect)
 
     def _draw_player_score_display(self) -> None:
-        """Draw the player score display below the board."""
+        """Draw the black player score display below the board (bottom = black, always)."""
         from src.ui.constants import CELL_MARGIN, RIM_WIDTH, CELL_RADIUS
         import math
 
@@ -2529,33 +2664,40 @@ class BoardScene:
 
         # Calculate positions for text and button
         text_button_spacing = 15  # Space between text and button
-        total_width = self.player_score_label_text.get_width() + text_button_spacing + (self.score_button_radius * 2)
+        total_width = self.black_score_label_text.get_width() + text_button_spacing + (self.score_button_radius * 2)
 
         # Center the entire score display
         start_x = board_center_x - (total_width // 2)
         text_x = start_x
-        button_center_x = start_x + self.player_score_label_text.get_width() + text_button_spacing + self.score_button_radius
+        button_center_x = start_x + self.black_score_label_text.get_width() + text_button_spacing + self.score_button_radius
 
-        # Draw "Your Score:" text
-        self.screen.blit(self.player_score_label_text, (text_x, score_display_y))
+        # Draw "Black Score:" text
+        self.screen.blit(self.black_score_label_text, (text_x, score_display_y))
 
         # Draw circular button with score
-        button_center = (button_center_x, score_display_y + self.player_score_label_text.get_height() // 2)
+        button_center = (button_center_x, score_display_y + self.black_score_label_text.get_height() // 2)
 
         # Draw white circle with gray border
         pygame.draw.circle(self.screen, self.score_button_bg_color, button_center, self.score_button_radius)
         pygame.draw.circle(self.screen, self.score_button_border_color, button_center, self.score_button_radius, 2)
 
         # Draw score text in the center of the circle
-        score_text = self.score_font.render(str(self.player_score), True, self.score_button_text_color)
+        score_text = self.score_font.render(str(self._black_score), True, self.score_button_text_color)
         score_text_rect = score_text.get_rect(center=button_center)
         self.screen.blit(score_text, score_text_rect)
 
     def _draw_control_buttons(self) -> None:
         """Draw the control buttons (start, pause, stop, reset) with icons."""
         for button in self.control_buttons:
-            # Choose color based on hover state
-            color = self.button_hover_color if button['hover'] else self.button_bg_color
+            # Determine if start button should appear disabled
+            is_start_disabled = (button['type'] == 'start' and not self.total_time_input_confirmed and not self.game_started)
+
+            if is_start_disabled:
+                # Draw disabled state (grayed out)
+                color = (180, 180, 180)  # Gray
+            else:
+                # Choose color based on hover state
+                color = self.button_hover_color if button['hover'] else self.button_bg_color
 
             # Draw circular button background
             center = button['rect'].center
@@ -2563,8 +2705,9 @@ class BoardScene:
             pygame.draw.circle(self.screen, color, center, radius)
 
             # Draw button icon based on type
+            icon_color = (160, 160, 160) if is_start_disabled else self.button_icon_color
             if button['type'] == 'start':
-                self._draw_play_icon(center, radius)
+                self._draw_play_icon(center, radius, icon_color)
             elif button['type'] == 'pause':
                 self._draw_pause_icon(center, radius)
             elif button['type'] == 'stop':
@@ -2578,8 +2721,10 @@ class BoardScene:
                 else:
                     self._draw_reset_icon(center, radius)
 
-    def _draw_play_icon(self, center: tuple, radius: int) -> None:
+    def _draw_play_icon(self, center: tuple, radius: int, icon_color: tuple = None) -> None:
         """Draw a play/start triangle icon."""
+        if icon_color is None:
+            icon_color = self.button_icon_color
         # Triangle pointing right
         size = radius * 0.5
         points = [
@@ -2587,7 +2732,7 @@ class BoardScene:
             (center[0] - size * 0.4, center[1] + size),
             (center[0] + size * 0.8, center[1])
         ]
-        pygame.draw.polygon(self.screen, self.button_icon_color, points)
+        pygame.draw.polygon(self.screen, icon_color, points)
 
     def _draw_pause_icon(self, center: tuple, radius: int) -> None:
         """Draw a pause (two vertical bars) icon."""
@@ -2648,8 +2793,8 @@ class BoardScene:
         # Scale boxes based on available width
         scale_factor = max(0.7, min(available_width / 1200, 1.2))  # Scale between 0.7x and 1.2x
 
-        total_box_width = int(200 * scale_factor)
-        total_box_height = int(70 * scale_factor)
+        total_box_width = int(220 * scale_factor)
+        total_box_height = int(80 * scale_factor)
         timer_box_width = int(120 * scale_factor)
         timer_box_height = int(60 * scale_factor)
 
@@ -2665,19 +2810,53 @@ class BoardScene:
         pygame.draw.rect(self.screen, self.total_time_box_color, total_box_rect, border_radius=10)
         pygame.draw.rect(self.screen, (0, 0, 0), total_box_rect, width=2, border_radius=10)
 
-        # Draw total time text with responsive font
         label_font = pygame.font.Font(None, int(20 * scale_factor))
-        total_label = label_font.render("Total Game Time:", True, self.timer_text_color)
-        total_label_rect = total_label.get_rect(center=(total_box_rect.centerx, total_box_rect.centery - int(15 * scale_factor)))
-        self.screen.blit(total_label, total_label_rect)
-
-        # Draw total time value
         value_font = pygame.font.Font(None, int(38 * scale_factor))
-        minutes = self.total_time // 60
-        seconds = self.total_time % 60
-        total_value = value_font.render(f"{minutes}:{seconds:02d}", True, self.timer_text_color)
-        total_value_rect = total_value.get_rect(center=(total_box_rect.centerx, total_box_rect.centery + int(15 * scale_factor)))
-        self.screen.blit(total_value, total_value_rect)
+
+        if self.total_time_input_confirmed:
+            # Show label and countdown
+            total_label = label_font.render("Total Game Time:", True, self.timer_text_color)
+            total_label_rect = total_label.get_rect(center=(total_box_rect.centerx, total_box_rect.centery - int(15 * scale_factor)))
+            self.screen.blit(total_label, total_label_rect)
+
+            minutes = self.total_time // 60
+            seconds = self.total_time % 60
+            total_value = value_font.render(f"{minutes}:{seconds:02d}", True, self.timer_text_color)
+            total_value_rect = total_value.get_rect(center=(total_box_rect.centerx, total_box_rect.centery + int(15 * scale_factor)))
+            self.screen.blit(total_value, total_value_rect)
+        else:
+            # Show label and editable input field
+            total_label = label_font.render("Total Game Time (min):", True, self.timer_text_color)
+            total_label_rect = total_label.get_rect(center=(total_box_rect.centerx, total_box_rect.centery - int(15 * scale_factor)))
+            self.screen.blit(total_label, total_label_rect)
+
+            # Draw input field
+            input_w = int(70 * scale_factor)
+            input_h = int(28 * scale_factor)
+            input_x = total_box_rect.centerx - input_w // 2
+            input_y = total_box_rect.centery + int(5 * scale_factor)
+            self.total_time_input_rect = pygame.Rect(input_x, input_y, input_w, input_h)
+
+            bg_color = self.total_time_input_color_active if self.total_time_input_active else self.total_time_input_color_inactive
+            border_color = self.total_time_input_border_active if self.total_time_input_active else self.total_time_input_border_inactive
+            pygame.draw.rect(self.screen, bg_color, self.total_time_input_rect, border_radius=5)
+            pygame.draw.rect(self.screen, border_color, self.total_time_input_rect, width=2, border_radius=5)
+
+            # Draw text inside input field (or placeholder)
+            input_font = pygame.font.Font(None, int(28 * scale_factor))
+            if self.total_time_input_text:
+                input_surface = input_font.render(self.total_time_input_text, True, (0, 0, 0))
+            else:
+                input_surface = input_font.render("--", True, (150, 150, 150))
+            input_surface_rect = input_surface.get_rect(center=self.total_time_input_rect.center)
+            self.screen.blit(input_surface, input_surface_rect)
+
+            # Draw blinking cursor when active
+            if self.total_time_input_active and (pygame.time.get_ticks() // 500) % 2 == 0:
+                cursor_x = input_surface_rect.right + 2
+                cursor_y1 = self.total_time_input_rect.centery - int(10 * scale_factor)
+                cursor_y2 = self.total_time_input_rect.centery + int(10 * scale_factor)
+                pygame.draw.line(self.screen, (0, 0, 0), (cursor_x, cursor_y1), (cursor_x, cursor_y2), 2)
 
         # Draw first 5 sec timer on TOP RIGHT (under total time)
         timer1_box_x = board_center_x + right_offset
@@ -2686,8 +2865,8 @@ class BoardScene:
         pygame.draw.rect(self.screen, (211, 211, 211), timer1_box_rect, border_radius=8)
         pygame.draw.rect(self.screen, (0, 0, 0), timer1_box_rect, width=2, border_radius=8)
 
-        # Draw only the timer value (5 sec) centered in box
-        timer1_value = value_font.render(f"{self.move_time_computer:.1f}s", True, self.timer_text_color)
+        # Draw only the timer value (5 sec) centered in box – WHITE's time (top)
+        timer1_value = value_font.render(f"{self._white_move_time:.1f}s", True, self.timer_text_color)
         timer1_value_rect = timer1_value.get_rect(center=timer1_box_rect.center)
         self.screen.blit(timer1_value, timer1_value_rect)
 
@@ -2698,23 +2877,23 @@ class BoardScene:
         pygame.draw.rect(self.screen, (211, 211, 211), timer2_box_rect, border_radius=8)
         pygame.draw.rect(self.screen, (0, 0, 0), timer2_box_rect, width=2, border_radius=8)
 
-        # Draw only the timer value (5 sec) centered in box
-        timer2_value = value_font.render(f"{self.move_time_player:.1f}s", True, self.timer_text_color)
+        # Draw only the timer value (5 sec) centered in box – BLACK's time (bottom)
+        timer2_value = value_font.render(f"{self._black_move_time:.1f}s", True, self.timer_text_color)
         timer2_value_rect = timer2_value.get_rect(center=timer2_box_rect.center)
         self.screen.blit(timer2_value, timer2_value_rect)
 
         # Draw move limit displays below the timer boxes
         move_limit_font = pygame.font.Font(None, int(26 * scale_factor))
 
-        # Computer move limit (below top-right timer) - aligned with timer box
-        computer_move_text = move_limit_font.render(f"Moves: {self.computer_moves_remaining}/{self.move_limit}", True, self.timer_text_color)
-        computer_move_rect = computer_move_text.get_rect(topleft=(timer1_box_x, timer1_box_y + timer_box_height + int(8 * scale_factor)))
-        self.screen.blit(computer_move_text, computer_move_rect)
+        # White move limit (below top-right timer) - aligned with timer box
+        white_move_text = move_limit_font.render(f"Moves: {self._white_moves_remaining}/{self.move_limit}", True, self.timer_text_color)
+        white_move_rect = white_move_text.get_rect(topleft=(timer1_box_x, timer1_box_y + timer_box_height + int(8 * scale_factor)))
+        self.screen.blit(white_move_text, white_move_rect)
 
-        # Player move limit (below bottom-right timer) - aligned with timer box
-        player_move_text = move_limit_font.render(f"Moves: {self.player_moves_remaining}/{self.move_limit}", True, self.timer_text_color)
-        player_move_rect = player_move_text.get_rect(topleft=(timer2_box_x, timer2_box_y - move_limit_font.get_height() - int(8 * scale_factor)))
-        self.screen.blit(player_move_text, player_move_rect)
+        # Black move limit (below bottom-right timer) - aligned with timer box
+        black_move_text = move_limit_font.render(f"Moves: {self._black_moves_remaining}/{self.move_limit}", True, self.timer_text_color)
+        black_move_rect = black_move_text.get_rect(topleft=(timer2_box_x, timer2_box_y - move_limit_font.get_height() - int(8 * scale_factor)))
+        self.screen.blit(black_move_text, black_move_rect)
 
     def run(self) -> None:
         """Run the board scene game loop."""
