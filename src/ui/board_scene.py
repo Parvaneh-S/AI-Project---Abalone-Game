@@ -168,6 +168,7 @@ class BoardScene:
         self.total_time = 0  # Current remaining total time (set when user enters value)
         self.is_game_timer_running = False
         self.start_ticks = 0
+        self.pause_ticks = 0  # Track when pause started, to adjust for pause duration on resume
 
         # Total game time input field state
         self.total_time_input_text = ""  # Text currently in the input field
@@ -202,6 +203,11 @@ class BoardScene:
         self.total_time_input_border_inactive = (100, 100, 100)  # Gray border when not focused
         self.total_time_input_rect = pygame.Rect(0, 0, 80, 30)  # Will be positioned dynamically
 
+        # Store pause/resume state
+        self.total_time_at_pause = 0  # Store the exact total_time when paused
+        self.paused_elapsed_time = 0  # Store elapsed time at pause for accurate resume
+        self.skip_timer_update = False  # Skip one update frame after resume to preserve restored value
+
 
     def _reset_timer_for_next_turn(self) -> None:
         """Reset ONLY the per-move timer when switching to next player's turn."""
@@ -217,8 +223,20 @@ class BoardScene:
 
         # Total game time - never resets, counts continuously from game start
         if self.total_time_limit is not None:
-            total_elapsed = (pygame.time.get_ticks() - self.start_ticks) // 1000
-            self.total_time = max(0, self.total_time_limit - total_elapsed)
+            # Skip recalculation on first frame after resume to preserve restored value
+            if self.skip_timer_update:
+                self.skip_timer_update = False
+                # Don't update this frame, preserves restored total_time
+            else:
+                current_ticks = pygame.time.get_ticks()
+                total_elapsed = (current_ticks - self.start_ticks) // 1000
+                old_total = self.total_time
+                self.total_time = max(0, self.total_time_limit - total_elapsed)
+
+                # Log every second
+                if old_total != self.total_time:
+                    print(f"⏱ TIMER UPDATE: elapsed={total_elapsed}s, total_limit={self.total_time_limit}s, remaining={self.total_time}s")
+
             # If total game time expired, trigger timeout for the current turn's player
             if self.total_time <= 0 and not self.show_timeout_modal:
                 self._trigger_move_timeout(self.current_turn_color)
@@ -1398,7 +1416,13 @@ class BoardScene:
                 print("Total game time must be a positive number!")
                 return
             self.total_time_limit = minutes * 60  # Convert minutes to seconds
-            self.total_time = self.total_time_limit
+            # Only reset total_time if game hasn't started yet (first confirmation)
+            # If game is already running, don't reset it (preserves time during pause/resume)
+            if not self.game_started:
+                self.total_time = self.total_time_limit
+                print(f"_confirm_total_time_input (FIRST): total_time_limit={self.total_time_limit}, total_time={self.total_time}")
+            else:
+                print(f"_confirm_total_time_input (RESUME): total_time_limit={self.total_time_limit}, NOT resetting total_time (keeping {self.total_time})")
             self.total_time_input_confirmed = True
             self.total_time_input_active = False
             print(f"Total game time set to {minutes} minutes ({self.total_time_limit} seconds)")
@@ -1420,16 +1444,39 @@ class BoardScene:
             self.move_start_ticks = pygame.time.get_ticks()  # Per-move timer starts here (will reset per turn)
             self._move_turn_start_us = time.perf_counter_ns() // 1000  # µs timer for move duration
             self._recompute_legal_moves()
-            print("Game started!")
+            print(f"Game started! Time limit: {self.total_time_limit}s")
         elif self.game_paused:
-            # Resume if paused
+            # Resume if paused - adjust start_ticks to account for pause duration
             self.game_paused = False
             self.show_pause_modal = False
             self.is_game_timer_running = True
-            # Don't reset start_ticks - total game time keeps running
-            self.move_start_ticks = pygame.time.get_ticks()  # Reset per-move timer when resuming
-            self._move_turn_start_us = time.perf_counter_ns() // 1000  # µs timer for move duration
-            print("Game resumed!")
+
+            # Calculate how long the game was paused
+            pause_duration = pygame.time.get_ticks() - self.pause_ticks
+            old_start = self.start_ticks
+            # Adjust start_ticks forward by the pause duration
+            # This way, the elapsed time calculation won't include the paused time
+            self.start_ticks += pause_duration
+
+            # CRITICAL: Also adjust move_start_ticks so opponent timer continues from pause
+            self.move_start_ticks += pause_duration
+
+            # CRITICAL: Restore the exact time from when paused
+            # This prevents fresh recalculation from overwriting it
+            self.total_time = self.total_time_at_pause
+            self.skip_timer_update = True  # Skip next update frame to preserve restored value
+
+            # Reset per-move turn timer (µs precision)
+            self._move_turn_start_us = time.perf_counter_ns() // 1000
+
+            print(f"\n{'='*70}")
+            print(f"🟢 GAME RESUMED")
+            print(f"  pause_duration={pause_duration}ms")
+            print(f"  total_time RESTORED to: {self.total_time}s")
+            print(f"  start_ticks: {old_start} → {self.start_ticks} (adjusted +{pause_duration})")
+            print(f"  total_time={self.total_time}s (should CONTINUE from this)")
+            print(f"  is_game_timer_running=True")
+            print(f"{'='*70}\n")
         else:
             print("Game is already running!")
 
@@ -1438,8 +1485,19 @@ class BoardScene:
         if not self.game_paused:
             # Pausing the game — no modal, just pause
             self.game_paused = True
+            self.show_pause_modal = False  # Don't show modal, just pause
             self.is_game_timer_running = False
-            print("Game paused!")
+            self.pause_ticks = pygame.time.get_ticks()  # Record when pause started
+            self.total_time_at_pause = self.total_time  # STORE exact time at pause!
+            # Store elapsed time to use on resume
+            self.paused_elapsed_time = (self.pause_ticks - self.start_ticks) // 1000
+            print(f"\n{'='*70}")
+            print(f"🔴 GAME PAUSED")
+            print(f"  total_time={self.total_time}s (STORED: {self.total_time_at_pause}s)")
+            print(f"  start_ticks={self.start_ticks}")
+            print(f"  pause_ticks={self.pause_ticks}")
+            print(f"  is_game_timer_running=False")
+            print(f"{'='*70}\n")
 
     def _stop_game(self) -> None:
         """Show stop confirmation modal."""
@@ -1869,13 +1927,19 @@ class BoardScene:
             self.timeout_loser_color = None
             self.is_game_timer_running = False
             self.total_time = 0
+            self.start_ticks = 0
+            self.pause_ticks = 0
+            self.total_time_at_pause = 0
+            self.paused_elapsed_time = 0
+            self.skip_timer_update = False
             self.total_time_input_text = ""
             self.total_time_input_active = False
             self.total_time_input_confirmed = False
             self.total_time_limit = None
             self.game_started = False
-            self.move_time_computer = 5
-            self.move_time_player = 5
+            # Reset move times to original configured values
+            self.move_time_computer = self._original_move_time_computer
+            self.move_time_player = self._original_move_time_player
             self.player_moves_remaining = self.move_limit
             self.computer_moves_remaining = self.move_limit
             self.selected_marbles = []
@@ -1964,10 +2028,13 @@ class BoardScene:
 
         # Check clicks
         if geom['resume_button'].collidepoint(pos):
-            # Resume game
+            # Resume game - call _start_game() to properly restore timer state
             self.game_paused = False
             self.show_pause_modal = False
-            print("Game resumed!")
+            self.is_game_timer_running = True
+            self.move_start_ticks = pygame.time.get_ticks()  # Reset per-move timer when resuming
+            self._move_turn_start_us = time.perf_counter_ns() // 1000  # µs timer for move duration
+            print(f"Game resumed via pause modal! total_time={self.total_time}, start_ticks={self.start_ticks}")
         elif geom['quit_button'].collidepoint(pos):
             # Quit to menu
             print("Quitting to menu...")
