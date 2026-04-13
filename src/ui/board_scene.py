@@ -66,6 +66,7 @@ class BoardScene:
         self.initial_marble_positions = None  # Store initial board state for reset
         self.show_pause_modal = False  # Whether to show pause modal
         self.show_stop_modal = False  # Whether to show stop confirmation modal
+        self.setup_mode = False  # Whether the game is in free setup mode (stop button)
 
         # Timeout (move time limit exceeded) state
         self.show_timeout_modal = False  # Whether to show the timeout game-over modal
@@ -641,9 +642,9 @@ class BoardScene:
 
         Handles both Human vs AI (mode 0) and AI vs AI (mode 1).
         """
-        if not self.game_started or self.game_paused:
+        if not self.game_started or self.game_paused or self.setup_mode:
             return
-        if self.show_pause_modal or self.show_stop_modal or self.show_timeout_modal or self.show_win_modal or self.show_move_limit_modal:
+        if self.show_pause_modal or self.show_timeout_modal or self.show_win_modal or self.show_move_limit_modal:
             return
 
         # ── If a background AI thread has finished, apply its result ──
@@ -1173,7 +1174,12 @@ class BoardScene:
                 elif button['type'] == 'pause':
                     self.tooltip_text = "Pause"
                 elif button['type'] == 'stop':
-                    self.tooltip_text = "Stop"
+                    if self.game_mode != 0:
+                        self.tooltip_text = "Setup (Human vs AI only)"
+                    elif self.setup_mode:
+                        self.tooltip_text = "In Setup Mode"
+                    else:
+                        self.tooltip_text = "Setup Mode"
                 elif button['type'] == 'reset':
                     self.tooltip_text = "Reset"
             else:
@@ -1238,13 +1244,6 @@ class BoardScene:
                         return False
                     continue
 
-                # If stop modal is showing, handle modal button clicks
-                if self.show_stop_modal:
-                    self._handle_stop_modal_click(event.pos)
-                    # If yes was clicked in modal, running will be False
-                    if not self.running:
-                        return False
-                    continue
 
                 # Check if back button was clicked
                 if self.back_button_rect.collidepoint(event.pos):
@@ -1276,6 +1275,20 @@ class BoardScene:
                 if self.undo_button_rect.collidepoint(event.pos):
                     self._handle_undo_button_click()
                     continue
+
+                # ── Setup mode: free marble placement (any marble, any empty cell) ──
+                if self.setup_mode:
+                    marble_at_pos = self._get_marble_at_position(event.pos)
+                    if marble_at_pos is not None:
+                        # Start dragging this marble (any colour)
+                        self._setup_dragging = True
+                        self._setup_dragged_marble = marble_at_pos
+                        marble_center = self._get_marble_screen_position(marble_at_pos)
+                        self._setup_drag_offset = (
+                            event.pos[0] - marble_center[0],
+                            event.pos[1] - marble_center[1],
+                        )
+                    continue  # block normal game interaction while in setup mode
 
                 # Determine whether the human player is allowed to interact
                 # In Human vs AI (mode 0) or AI vs AI (mode 1), only allow
@@ -1337,6 +1350,19 @@ class BoardScene:
                             self._dest_to_move = {}
 
             if event.type == pygame.MOUSEBUTTONUP:
+                # ── Setup mode drop ──
+                if self.setup_mode and getattr(self, '_setup_dragging', False) and self._setup_dragged_marble is not None:
+                    drop_cell = self._get_cell_at_position(event.pos)
+                    if drop_cell is not None and drop_cell not in self.marble_positions:
+                        # Move marble to the new empty cell
+                        color = self.marble_positions.pop(self._setup_dragged_marble)
+                        self.marble_positions[drop_cell] = color
+                    # Reset setup drag state
+                    self._setup_dragging = False
+                    self._setup_dragged_marble = None
+                    self._setup_drag_offset = (0, 0)
+                    continue
+
                 if self.dragging and self.dragged_marble:
                     # Determine if the mouse moved enough to count as a drag
                     drag_threshold = 5  # pixels
@@ -1421,14 +1447,54 @@ class BoardScene:
             self._move_turn_start_us = time.perf_counter_ns() // 1000  # µs timer for move duration
             self._recompute_legal_moves()
             print("Game started!")
+        elif self.setup_mode:
+            # Resuming from setup mode – AI plays next
+            self.setup_mode = False
+            self.game_paused = False
+            self.is_game_timer_running = True
+
+            # Discard any in-flight AI computation from before setup mode
+            self._ai_thread = None
+            self._ai_result = None
+            self._ai_thread_done = False
+            self._ai_thinking = False
+
+            # Set the turn to the AI's colour so the agent moves next
+            ai_color = WHITE_COLOR if self.player_color == BLACK_COLOR else BLACK_COLOR
+            self.current_turn_color = ai_color
+
+            # Restore timers so they continue from where they were paused
+            now = pygame.time.get_ticks()
+            paused_move_elapsed = getattr(self, '_paused_move_elapsed_ms', 0)
+            paused_total_elapsed = getattr(self, '_paused_total_elapsed_ms', 0)
+            self.move_start_ticks = now - paused_move_elapsed
+            self.start_ticks = now - paused_total_elapsed
+            self._move_turn_start_us = time.perf_counter_ns() // 1000 - paused_move_elapsed * 1000
+
+            # Reset the per-move timer for the AI's turn
+            self._reset_timer_for_next_turn()
+
+            # Recompute legal moves for the AI
+            self._recompute_legal_moves()
+
+            # Clear selection state
+            self.selected_marbles = []
+            self._dest_to_move = {}
+
+            print("Setup mode ended – AI's turn to move.")
         elif self.game_paused:
             # Resume if paused
             self.game_paused = False
             self.show_pause_modal = False
             self.is_game_timer_running = True
-            # Don't reset start_ticks - total game time keeps running
-            self.move_start_ticks = pygame.time.get_ticks()  # Reset per-move timer when resuming
-            self._move_turn_start_us = time.perf_counter_ns() // 1000  # µs timer for move duration
+            # Restore timers so they continue from where they were paused
+            now = pygame.time.get_ticks()
+            paused_move_elapsed = getattr(self, '_paused_move_elapsed_ms', 0)
+            paused_total_elapsed = getattr(self, '_paused_total_elapsed_ms', 0)
+            self.move_start_ticks = now - paused_move_elapsed  # Continue per-move timer
+            self.start_ticks = now - paused_total_elapsed       # Continue total game timer
+            # Also restore the µs-precision move timer
+            self._move_turn_start_us = time.perf_counter_ns() // 1000 - paused_move_elapsed * 1000
             print("Game resumed!")
         else:
             print("Game is already running!")
@@ -1436,15 +1502,50 @@ class BoardScene:
     def _pause_game(self) -> None:
         """Pause the game (resume is handled by the play/start button)."""
         if not self.game_paused:
+            # Save how much of the per-move time has already elapsed (in ms)
+            self._paused_move_elapsed_ms = pygame.time.get_ticks() - self.move_start_ticks
+            # Save how much total-game time has already elapsed (in ms)
+            self._paused_total_elapsed_ms = pygame.time.get_ticks() - self.start_ticks
             # Pausing the game — no modal, just pause
             self.game_paused = True
             self.is_game_timer_running = False
             print("Game paused!")
 
     def _stop_game(self) -> None:
-        """Show stop confirmation modal."""
-        self.show_stop_modal = True
-        print("Stop confirmation modal shown")
+        """Enter setup mode (only in Human vs AI mode).
+
+        Pauses timers and allows the user to freely rearrange all marbles
+        (both black and white). Pressing Start again will resume the game
+        with the AI making the next move.
+        """
+        if self.game_mode != 0:
+            print("Setup mode is only available in Human vs AI mode.")
+            return
+        if not self.game_started:
+            print("Cannot enter setup mode: game has not started.")
+            return
+        if self.setup_mode:
+            print("Already in setup mode.")
+            return
+
+        # Pause timers (same as pause)
+        self._paused_move_elapsed_ms = pygame.time.get_ticks() - self.move_start_ticks
+        self._paused_total_elapsed_ms = pygame.time.get_ticks() - self.start_ticks
+        self.game_paused = True
+        self.is_game_timer_running = False
+        self.setup_mode = True
+
+        # Clear any current selection
+        self.selected_marbles = []
+        self._dest_to_move = {}
+
+        # If the AI thread is running, we still flag setup mode;
+        # _maybe_ai_move will not apply results while setup_mode is True.
+        self._setup_dragging = False
+        self._setup_dragged_marble = None
+        self._setup_drag_offset = (0, 0)
+
+        print("Setup mode activated – rearrange marbles freely, then press Start.")
 
     def _confirm_stop_game(self) -> None:
         """Actually stop the game and go back to menu."""
@@ -1887,6 +1988,7 @@ class BoardScene:
             self._last_move_time_us = None
             self._move_turn_start_us = time.perf_counter_ns() // 1000
             self.current_turn_color = BLACK_COLOR
+            self.setup_mode = False
             self._ai_thinking = False
             if self.game_started:
                 self._recompute_legal_moves()
@@ -1967,6 +2069,14 @@ class BoardScene:
             # Resume game
             self.game_paused = False
             self.show_pause_modal = False
+            self.is_game_timer_running = True
+            # Restore timers so they continue from where they were paused
+            now = pygame.time.get_ticks()
+            paused_move_elapsed = getattr(self, '_paused_move_elapsed_ms', 0)
+            paused_total_elapsed = getattr(self, '_paused_total_elapsed_ms', 0)
+            self.move_start_ticks = now - paused_move_elapsed
+            self.start_ticks = now - paused_total_elapsed
+            self._move_turn_start_us = time.perf_counter_ns() // 1000 - paused_move_elapsed * 1000
             print("Game resumed!")
         elif geom['quit_button'].collidepoint(pos):
             # Quit to menu
@@ -2179,10 +2289,15 @@ class BoardScene:
         pygame.draw.rect(self.screen, self.horizontal_box_color, self.horizontal_box_rect)
 
         # Draw turn indicator text in the center of the horizontal box
-        is_human = (self.current_turn_color == self.player_color)
-        turn_text = self.human_turn_text if is_human else self.computer_turn_text
-        turn_text_rect = turn_text.get_rect(center=self.horizontal_box_rect.center)
-        self.screen.blit(turn_text, turn_text_rect)
+        if self.setup_mode:
+            setup_text = self.turn_font.render("Setup Mode", True, (0, 140, 140))
+            setup_text_rect = setup_text.get_rect(center=self.horizontal_box_rect.center)
+            self.screen.blit(setup_text, setup_text_rect)
+        else:
+            is_human = (self.current_turn_color == self.player_color)
+            turn_text = self.human_turn_text if is_human else self.computer_turn_text
+            turn_text_rect = turn_text.get_rect(center=self.horizontal_box_rect.center)
+            self.screen.blit(turn_text, turn_text_rect)
 
         # Draw the move history text
         self._draw_move_history()
@@ -2217,6 +2332,24 @@ class BoardScene:
                 # Draw marble
                 pygame.draw.circle(self.screen, color, (drag_x, drag_y), CELL_RADIUS)
 
+        # Draw setup-mode dragged marble on top
+        if self.setup_mode and getattr(self, '_setup_dragging', False) and self._setup_dragged_marble is not None:
+            mouse_pos = pygame.mouse.get_pos()
+            drag_x = mouse_pos[0] - self._setup_drag_offset[0]
+            drag_y = mouse_pos[1] - self._setup_drag_offset[1]
+            color = self.marble_positions.get(self._setup_dragged_marble)
+            if color:
+                # Draw highlight ring (cyan to indicate setup mode)
+                pygame.draw.circle(self.screen, (0, 200, 200), (drag_x, drag_y), CELL_RADIUS + 5, 4)
+                # Draw shadow
+                pygame.draw.circle(self.screen, (120, 120, 120), (drag_x, drag_y), CELL_RADIUS + 1)
+                # Draw marble
+                pygame.draw.circle(self.screen, color, (drag_x, drag_y), CELL_RADIUS)
+
+        # Draw setup mode banner if active
+        if self.setup_mode:
+            self._draw_setup_mode_banner()
+
         # Draw pause modal if showing
         if self.show_pause_modal:
             self._draw_pause_modal()
@@ -2225,9 +2358,6 @@ class BoardScene:
         if self.tooltip_text:
             self._draw_tooltip()
 
-        # Draw stop confirmation modal if showing
-        if self.show_stop_modal:
-            self._draw_stop_modal()
 
         # Draw timeout game-over modal if showing
         if self.show_timeout_modal:
@@ -2242,6 +2372,21 @@ class BoardScene:
             self._draw_win_modal()
 
         pygame.display.flip()
+
+    def _draw_setup_mode_banner(self) -> None:
+        """Draw a semi-transparent banner at the top indicating setup mode."""
+        window_w, _ = self.screen.get_size()
+        available_width = window_w - self.sidebar_width
+
+        banner_height = 40
+        banner_surface = pygame.Surface((available_width, banner_height), pygame.SRCALPHA)
+        banner_surface.fill((0, 160, 160, 180))  # Teal, semi-transparent
+        self.screen.blit(banner_surface, (0, 60))
+
+        font = pygame.font.Font(None, 30)
+        text = font.render("SETUP MODE – Drag any marble to rearrange, then press Start", True, (255, 255, 255))
+        text_rect = text.get_rect(center=(available_width // 2, 60 + banner_height // 2))
+        self.screen.blit(text, text_rect)
 
     def _draw_tooltip(self) -> None:
         """Draw tooltip at mouse position."""
@@ -2691,10 +2836,17 @@ class BoardScene:
         for button in self.control_buttons:
             # Determine if start button should appear disabled
             is_start_disabled = (button['type'] == 'start' and not self.total_time_input_confirmed and not self.game_started)
+            # Stop button is disabled when not in Human vs AI mode
+            is_stop_disabled = (button['type'] == 'stop' and self.game_mode != 0)
+            # Stop button highlighted when setup mode is active
+            is_stop_active = (button['type'] == 'stop' and self.setup_mode)
 
-            if is_start_disabled:
+            if is_start_disabled or is_stop_disabled:
                 # Draw disabled state (grayed out)
                 color = (180, 180, 180)  # Gray
+            elif is_stop_active:
+                # Highlight the stop button in teal when setup mode is on
+                color = (0, 180, 180) if button['hover'] else (0, 160, 160)
             else:
                 # Choose color based on hover state
                 color = self.button_hover_color if button['hover'] else self.button_bg_color
@@ -2705,7 +2857,7 @@ class BoardScene:
             pygame.draw.circle(self.screen, color, center, radius)
 
             # Draw button icon based on type
-            icon_color = (160, 160, 160) if is_start_disabled else self.button_icon_color
+            icon_color = (160, 160, 160) if (is_start_disabled or is_stop_disabled) else self.button_icon_color
             if button['type'] == 'start':
                 self._draw_play_icon(center, radius, icon_color)
             elif button['type'] == 'pause':
