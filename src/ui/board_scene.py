@@ -1975,8 +1975,8 @@ class BoardScene:
             self.total_time_input_confirmed = False
             self.total_time_limit = None
             self.game_started = False
-            self.move_time_computer = 5
-            self.move_time_player = 5
+            self.move_time_player = self._original_move_time_player
+            self.move_time_computer = self._original_move_time_computer
             self.player_moves_remaining = self.move_limit
             self.computer_moves_remaining = self.move_limit
             self.selected_marbles = []
