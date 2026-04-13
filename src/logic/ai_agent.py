@@ -1,16 +1,24 @@
 """
-AI Agent for Abalone Game.
+AI Agent for Abalone Game — Tournament-Strength Edition.
 
-Implements an iterative-deepening minimax search with alpha-beta pruning
-and a multi-factor heuristic evaluation function for intelligent move
-selection.  A configurable time budget ensures the agent always returns
-a move before the clock expires.
+A highly optimised iterative-deepening alpha-beta agent with:
+  • Zobrist-hashed transposition table
+  • Principal Variation Search (PVS)
+  • Killer move & history heuristic move ordering
+  • Late Move Reductions (LMR)
+  • Quiescence search for captures
+  • Belgian-Daisy-aware multi-phase evaluation
+  • Cluster detection via flood-fill (daisy formation tracking)
+  • Advanced threat / danger analysis (2v1, 3v1, 3v2, near-threats)
+  • Adaptive time management
 """
 from __future__ import annotations
 
 import math
+import random
 import time
-from typing import List, Optional, Tuple
+from collections import defaultdict, deque
+from typing import Dict, List, Optional, Set, Tuple
 
 from src.logic.move_engine import (
     Board as EngineBoard,
@@ -24,159 +32,435 @@ from src.logic.move_engine import (
     generate_moves,
 )
 
-# ---------------------------------------------------------------------------
-# Heuristic weights – tuned for Abalone
-# ---------------------------------------------------------------------------
-_W_MARBLE_COUNT = 100      # Marble advantage (most important)
-_W_CENTER_DIST  = -5       # Penalty per unit of Manhattan-distance from centre
-_W_COHESION     = 3        # Reward per friendly-neighbour pair
-_W_THREAT       = 8        # Bonus per opponent marble that can be pushed off
-_W_EDGE_PENALTY = -4       # Penalty for own marbles sitting on the rim
+# ═══════════════════════════════════════════════════════════════════════════
+#  PRE-COMPUTED LOOKUP TABLES (built once at import time)
+# ═══════════════════════════════════════════════════════════════════════════
 
-# ---------------------------------------------------------------------------
-# Endgame-awareness weights
-# ---------------------------------------------------------------------------
-_W_ENDGAME_SCORE_LEAD = 30   # Bonus per marble-diff unit when few moves remain
-_W_TIME_ADVANTAGE     = 10   # Bonus when we have used less total time than opponent
-_ENDGAME_MOVES_THRESHOLD = 8 # Remaining-moves count that activates endgame strategy
+_CELL_LIST: List[Cell] = sorted(ALL_CELLS)
+_CELL_INDEX: Dict[Cell, int] = {c: i for i, c in enumerate(_CELL_LIST)}
+_NUM_CELLS = len(_CELL_LIST)  # 61
 
-# ---------------------------------------------------------------------------
-# Time-management constants
-# ---------------------------------------------------------------------------
-_OPENING_MARBLE_COUNT = 14        # Each side starts with 14 marbles
-_OPENING_TIME_FRACTION = 0.25     # Use only 25% of time limit for opening moves
-_FEW_MOVES_THRESHOLD = 10         # Positions with fewer moves are "simple"
-_FEW_MOVES_TIME_FRACTION = 0.50   # Use 50% of time limit for simple positions
-_DOMINANCE_THRESHOLD = 150        # Score gap to consider a move clearly dominant
-_STABLE_DEPTH_COUNT = 3           # Consecutive depths with same best move → stop
+# Hex-ring distance from the centre (0,0)
+_RING: Dict[Cell, int] = {}
+for _c in ALL_CELLS:
+    _q, _r = _c
+    _RING[_c] = (abs(_q) + abs(_r) + abs(_q + _r)) // 2
 
+# Ring-based positional value (centre = best, edge = worst)
+_RING_VALUE: Dict[Cell, int] = {
+    c: {0: 8, 1: 5, 2: 3, 3: 1, 4: -2}[_RING[c]] for c in ALL_CELLS
+}
 
-def _is_opening_position(board: EngineBoard) -> bool:
-    """Return True when no captures have occurred yet (both sides have 14).
+# Neighbour list for every cell
+_NEIGHBOURS: Dict[Cell, List[Cell]] = {}
+for _c in ALL_CELLS:
+    _NEIGHBOURS[_c] = [cell_add(_c, d) for d in DIRS.values()
+                        if cell_add(_c, d) in ALL_CELLS]
 
-    This covers the very first moves regardless of the starting layout
-    (Standard, German Daisy, Belgian Daisy).
-    """
-    black = sum(1 for v in board.values() if v == 'b')
-    white = sum(1 for v in board.values() if v == 'w')
-    return black == _OPENING_MARBLE_COUNT and white == _OPENING_MARBLE_COUNT
+# Is-edge predicate
+_IS_EDGE: Dict[Cell, bool] = {c: _RING[c] == 4 for c in ALL_CELLS}
 
+# Near-edge (ring 3+)
+_IS_NEAR_EDGE: Dict[Cell, bool] = {c: _RING[c] >= 3 for c in ALL_CELLS}
 
-def _manhattan_from_centre(cell: Cell) -> int:
-    """Hex-grid Manhattan distance from the board centre (0, 0)."""
-    q, r = cell
-    return (abs(q) + abs(r) + abs(q + r)) // 2
+# ═══════════════════════════════════════════════════════════════════════════
+#  ZOBRIST HASHING
+# ═══════════════════════════════════════════════════════════════════════════
 
-
-def _is_edge_cell(cell: Cell) -> bool:
-    """Return True if *cell* is on the outermost ring of the board."""
-    return _manhattan_from_centre(cell) == 4  # RADIUS == 4
+_RNG = random.Random(42)  # deterministic seed for reproducibility
+_ZOBRIST: Dict[Tuple[Cell, str], int] = {}
+for _c in ALL_CELLS:
+    for _col in ('b', 'w'):
+        _ZOBRIST[(_c, _col)] = _RNG.getrandbits(64)
+_ZOBRIST_TURN: int = _RNG.getrandbits(64)  # XOR when it is black's turn
 
 
-def _count_friendly_neighbours(board: EngineBoard, player: EnginePlayer) -> int:
-    """Count the total number of adjacent same-colour pairs for *player*."""
-    count = 0
+def _zobrist_hash(board: EngineBoard, is_maximising: bool) -> int:
+    """Full Zobrist hash of *board* and side-to-move."""
+    h = 0
     for cell, colour in board.items():
-        if colour != player:
+        h ^= _ZOBRIST[(cell, colour)]
+    if is_maximising:
+        h ^= _ZOBRIST_TURN
+    return h
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  TRANSPOSITION TABLE
+# ═══════════════════════════════════════════════════════════════════════════
+
+_TT_EXACT = 0
+_TT_LOWER = 1  # score is a lower bound (failed high)
+_TT_UPPER = 2  # score is an upper bound (failed low)
+
+# Entry: (depth, flag, score, best_move_notation_or_None)
+_TTEntry = Tuple[int, int, float, Optional[str]]
+
+
+class _TranspositionTable:
+    """Fixed-size hash table using Zobrist keys."""
+
+    __slots__ = ('_table', '_mask')
+
+    def __init__(self, size_bits: int = 20) -> None:
+        self._mask = (1 << size_bits) - 1
+        self._table: Dict[int, _TTEntry] = {}
+
+    def probe(self, key: int) -> Optional[_TTEntry]:
+        return self._table.get(key & self._mask)
+
+    def store(self, key: int, depth: int, flag: int, score: float,
+              best_move_notation: Optional[str]) -> None:
+        idx = key & self._mask
+        old = self._table.get(idx)
+        # Always-replace if deeper or same depth
+        if old is None or depth >= old[0]:
+            self._table[idx] = (depth, flag, score, best_move_notation)
+
+    def clear(self) -> None:
+        self._table.clear()
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  CLUSTER DETECTION (Belgian Daisy formation analysis)
+# ═══════════════════════════════════════════════════════════════════════════
+
+def _flood_fill_clusters(cells: List[Cell]) -> List[List[Cell]]:
+    """Return connected components of *cells* on the hex grid."""
+    cell_set: Set[Cell] = set(cells)
+    visited: Set[Cell] = set()
+    clusters: List[List[Cell]] = []
+
+    for start in cells:
+        if start in visited:
             continue
-        for delta in DIRS.values():
-            nb = cell_add(cell, delta)
-            if board.get(nb) == player:
-                count += 1
-    # Each pair is counted twice (once from each end), but since we only
-    # compare relative scores the factor-of-two cancels out.
-    return count
+        cluster: List[Cell] = []
+        queue = deque([start])
+        visited.add(start)
+        while queue:
+            c = queue.popleft()
+            cluster.append(c)
+            for nb in _NEIGHBOURS[c]:
+                if nb in cell_set and nb not in visited:
+                    visited.add(nb)
+                    queue.append(nb)
+        clusters.append(cluster)
+
+    return clusters
 
 
-def _count_threats(board: EngineBoard, player: EnginePlayer) -> int:
-    """Estimate how many opponent marbles *player* can push off the board.
+def _centroid(cells: List[Cell]) -> Tuple[float, float]:
+    """Return the (q, r) centroid of a list of cells."""
+    n = len(cells)
+    if n == 0:
+        return (0.0, 0.0)
+    sq = sum(c[0] for c in cells)
+    sr = sum(c[1] for c in cells)
+    return (sq / n, sr / n)
 
-    A quick, cheap heuristic: look for 3-v-1 and 2-v-1 inline
-    configurations where the opponent marble would be pushed off the edge.
+
+def _cluster_compactness(cells: List[Cell]) -> float:
+    """Measure compactness: lower average distance to centroid is better.
+    Returns negative value (penalty for spread) so that higher = more compact."""
+    if len(cells) <= 1:
+        return 0.0
+    cq, cr = _centroid(cells)
+    total_dist = 0.0
+    for q, r in cells:
+        dq = q - cq
+        dr = r - cr
+        total_dist += (abs(dq) + abs(dr) + abs(dq + dr)) / 2
+    return -total_dist / len(cells)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  THREAT & DANGER ANALYSIS
+# ═══════════════════════════════════════════════════════════════════════════
+
+def _count_threats_advanced(board: EngineBoard, player: EnginePlayer) -> Tuple[float, float]:
+    """Compute (attack_threats, defensive_dangers) for *player*.
+
+    attack_threats  — weighted count of opponent marbles *player* can push off.
+    defensive_dangers — weighted count of *player*'s own marbles at risk.
+
+    Covers 2v1, 3v1, 3v2 push-off and near-threat situations.
     """
     opp = opponent(player)
-    threats = 0
+    attack = 0.0
+    danger = 0.0
+
     for dnum, delta in DIRS.items():
         for cell, colour in board.items():
-            if colour != player:
-                continue
-            # Check 2-v-1
-            next1 = cell_add(cell, delta)
-            if board.get(next1) != player:
-                continue
-            next2 = cell_add(next1, delta)
-            if board.get(next2) == opp:
-                beyond = cell_add(next2, delta)
-                if beyond not in ALL_CELLS:
-                    threats += 1
-            # Check 3-v-1
-            if board.get(next2) != player:
-                continue
-            next3 = cell_add(next2, delta)
-            if board.get(next3) == opp:
-                beyond3 = cell_add(next3, delta)
-                if beyond3 not in ALL_CELLS:
-                    threats += 1
-    return threats
+            # ── ATTACK threats (player pushing opponent off) ──────────
+            if colour == player:
+                n1 = cell_add(cell, delta)
+                if board.get(n1) != player:
+                    continue
+                n2 = cell_add(n1, delta)
 
+                # 2v1 push-off
+                if board.get(n2) == opp:
+                    beyond = cell_add(n2, delta)
+                    if beyond not in ALL_CELLS:
+                        attack += 4.0
+                    elif board.get(beyond) is None:
+                        # Near-threat: opponent 1 step from edge with our 2 inline
+                        if _IS_NEAR_EDGE.get(n2, False):
+                            attack += 1.0
+
+                # 3v1 push-off
+                if board.get(n2) == player:
+                    n3 = cell_add(n2, delta)
+                    if board.get(n3) == opp:
+                        beyond3 = cell_add(n3, delta)
+                        if beyond3 not in ALL_CELLS:
+                            attack += 5.0
+                        elif board.get(beyond3) is None:
+                            if _IS_NEAR_EDGE.get(n3, False):
+                                attack += 1.5
+
+                    # 3v2 push-off
+                    if board.get(n3) == opp:
+                        n4 = cell_add(n3, delta)
+                        if board.get(n4) == opp:
+                            beyond4 = cell_add(n4, delta)
+                            if beyond4 not in ALL_CELLS:
+                                attack += 3.0
+                            elif board.get(beyond4) is None:
+                                if _IS_NEAR_EDGE.get(n4, False):
+                                    attack += 0.8
+
+            # ── DEFENSIVE dangers (opponent pushing player off) ───────
+            if colour == opp:
+                n1 = cell_add(cell, delta)
+                if board.get(n1) != opp:
+                    continue
+                n2 = cell_add(n1, delta)
+
+                # 2v1 danger to our marble
+                if board.get(n2) == player:
+                    beyond = cell_add(n2, delta)
+                    if beyond not in ALL_CELLS:
+                        danger += 4.0
+                    elif board.get(beyond) is None and _IS_NEAR_EDGE.get(n2, False):
+                        danger += 1.0
+
+                # 3v1 danger
+                if board.get(n2) == opp:
+                    n3 = cell_add(n2, delta)
+                    if board.get(n3) == player:
+                        beyond3 = cell_add(n3, delta)
+                        if beyond3 not in ALL_CELLS:
+                            danger += 5.0
+                        elif board.get(beyond3) is None and _IS_NEAR_EDGE.get(n3, False):
+                            danger += 1.5
+
+                    # 3v2 danger
+                    if board.get(n3) == player:
+                        n4 = cell_add(n3, delta)
+                        if board.get(n4) == player:
+                            beyond4 = cell_add(n4, delta)
+                            if beyond4 not in ALL_CELLS:
+                                danger += 3.0
+
+    return attack, danger
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  GAME-PHASE DETECTION
+# ═══════════════════════════════════════════════════════════════════════════
+
+_OPENING_MARBLE_COUNT = 14
+
+# Phase constants
+_PHASE_OPENING = 0
+_PHASE_MIDGAME = 1
+_PHASE_ENDGAME = 2
+
+
+def _detect_phase(board: EngineBoard, player: EnginePlayer,
+                  remaining_moves: Optional[int] = None) -> int:
+    """Determine the game phase: opening, midgame, or endgame."""
+    my_count = sum(1 for v in board.values() if v == player)
+    opp_count = sum(1 for v in board.values() if v == opponent(player))
+
+    # Endgame: either side lost ≥3 marbles, or few moves remain
+    if (my_count <= 11 or opp_count <= 11 or
+            (remaining_moves is not None and remaining_moves <= 10)):
+        return _PHASE_ENDGAME
+
+    # Opening: no captures at all
+    if my_count == _OPENING_MARBLE_COUNT and opp_count == _OPENING_MARBLE_COUNT:
+        return _PHASE_OPENING
+
+    return _PHASE_MIDGAME
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  PHASE-DEPENDENT WEIGHT PROFILES (tuned for Belgian Daisy)
+# ═══════════════════════════════════════════════════════════════════════════
+
+# Keys: marble_count, ring_position, cohesion, attack_threat, danger,
+#       edge_penalty, formation, cluster_merge, center_of_mass,
+#       endgame_lead, time_advantage, breakaway
+_WEIGHTS = {
+    _PHASE_OPENING: {
+        'marble_count':   80,
+        'ring_position':  4,
+        'cohesion':       5,
+        'attack_threat':  3,
+        'danger':         -4,
+        'edge_penalty':   5,
+        'formation':      8,       # Keep daisy formations tight
+        'cluster_merge':  12,      # Strong incentive to merge two daisies
+        'center_of_mass': 6,
+        'endgame_lead':   0,
+        'time_advantage': 0,
+        'breakaway':      -6,      # Penalise isolated marbles leaving cluster
+    },
+    _PHASE_MIDGAME: {
+        'marble_count':   120,
+        'ring_position':  5,
+        'cohesion':       4,
+        'attack_threat':  10,
+        'danger':         -8,
+        'edge_penalty':   6,
+        'formation':      4,
+        'cluster_merge':  4,
+        'center_of_mass': 5,
+        'endgame_lead':   15,
+        'time_advantage': 5,
+        'breakaway':      -3,
+    },
+    _PHASE_ENDGAME: {
+        'marble_count':   200,
+        'ring_position':  3,
+        'cohesion':       3,
+        'attack_threat':  14,
+        'danger':         -12,
+        'edge_penalty':   8,
+        'formation':      2,
+        'cluster_merge':  0,
+        'center_of_mass': 3,
+        'endgame_lead':   40,
+        'time_advantage': 12,
+        'breakaway':      -2,
+    },
+}
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  EVALUATION FUNCTION
+# ═══════════════════════════════════════════════════════════════════════════
 
 def evaluate(board: EngineBoard, player: EnginePlayer, *,
              remaining_moves: Optional[int] = None,
              opp_remaining_moves: Optional[int] = None,
              my_total_time_us: Optional[int] = None,
              opp_total_time_us: Optional[int] = None) -> float:
-    """Return a heuristic score for *board* from *player*'s perspective.
+    """Multi-factor heuristic evaluation, Belgian Daisy optimised.
 
     Higher is better for *player*.
-
-    Optional endgame-context parameters
-    ------------------------------------
-    remaining_moves : moves left for *player* (None = unknown / unlimited).
-    opp_remaining_moves : moves left for the opponent.
-    my_total_time_us : cumulative µs *player* has spent on all moves so far.
-    opp_total_time_us : cumulative µs the opponent has spent.
-
-    When the game is close to ending (few remaining moves), the evaluation
-    puts extra weight on the current marble-count lead (score advantage)
-    and rewards having used less total time (tiebreaker advantage).
     """
     opp = opponent(player)
 
     my_cells = [c for c, v in board.items() if v == player]
     opp_cells = [c for c, v in board.items() if v == opp]
+    my_count = len(my_cells)
+    opp_count = len(opp_cells)
 
-    # 1. Marble advantage (captures are reflected by count difference)
-    marble_diff = len(my_cells) - len(opp_cells)
+    phase = _detect_phase(board, player, remaining_moves)
+    W = _WEIGHTS[phase]
 
-    # 2. Centrality – prefer positions closer to the centre
-    my_centre = sum(_manhattan_from_centre(c) for c in my_cells)
-    opp_centre = sum(_manhattan_from_centre(c) for c in opp_cells)
-    centre_score = opp_centre - my_centre  # positive when we are more central
+    # ── 1. Marble advantage ──────────────────────────────────────────────
+    marble_diff = my_count - opp_count
 
-    # 3. Cohesion – reward tightly grouped marbles
-    cohesion = (_count_friendly_neighbours(board, player)
-                - _count_friendly_neighbours(board, opp))
+    # ── 2. Ring-based positional score ───────────────────────────────────
+    my_ring = sum(_RING_VALUE[c] for c in my_cells)
+    opp_ring = sum(_RING_VALUE[c] for c in opp_cells)
+    ring_score = my_ring - opp_ring
 
-    # 4. Threat – reward configurations that can push opponent off
-    threat = _count_threats(board, player) - _count_threats(board, opp)
+    # ── 3. Cohesion (friendly-neighbour pairs) ───────────────────────────
+    my_cohesion = 0
+    for c in my_cells:
+        for nb in _NEIGHBOURS[c]:
+            if board.get(nb) == player:
+                my_cohesion += 1
+    opp_cohesion = 0
+    for c in opp_cells:
+        for nb in _NEIGHBOURS[c]:
+            if board.get(nb) == opp:
+                opp_cohesion += 1
+    cohesion_diff = my_cohesion - opp_cohesion
 
-    # 5. Edge penalty – discourage own marbles sitting on the rim
-    my_edge = sum(1 for c in my_cells if _is_edge_cell(c))
-    opp_edge = sum(1 for c in opp_cells if _is_edge_cell(c))
-    edge_score = opp_edge - my_edge  # positive when opponent has more edge marbles
+    # ── 4. Threat & danger analysis ──────────────────────────────────────
+    my_attack, my_danger = _count_threats_advanced(board, player)
+    opp_attack, opp_danger = _count_threats_advanced(board, opp)
+    threat_score = my_attack - opp_attack
+    danger_score = my_danger - opp_danger  # positive = we are more in danger
 
+    # ── 5. Edge penalty differential ─────────────────────────────────────
+    my_edge = sum(1 for c in my_cells if _IS_EDGE[c])
+    opp_edge = sum(1 for c in opp_cells if _IS_EDGE[c])
+    edge_diff = opp_edge - my_edge  # positive when opponent has more edge marbles
+
+    # ── 6. Formation / cluster analysis (Belgian Daisy aware) ────────────
+    formation_score = 0.0
+    cluster_merge_score = 0.0
+    breakaway_score = 0.0
+
+    my_clusters = _flood_fill_clusters(my_cells)
+
+    # Formation compactness: reward tight clusters
+    for cluster in my_clusters:
+        formation_score += _cluster_compactness(cluster) * len(cluster)
+
+    # Opponent formation (penalise if opponent is well-formed)
+    opp_clusters = _flood_fill_clusters(opp_cells)
+    for cluster in opp_clusters:
+        formation_score -= _cluster_compactness(cluster) * len(cluster) * 0.5
+
+    # Cluster merge incentive (Belgian Daisy: ideally merge 2 daisies into 1)
+    if len(my_clusters) >= 2:
+        # Compute distances between the two largest clusters' centroids
+        my_clusters.sort(key=len, reverse=True)
+        c1 = _centroid(my_clusters[0])
+        c2 = _centroid(my_clusters[1])
+        dq = c1[0] - c2[0]
+        dr = c1[1] - c2[1]
+        inter_dist = (abs(dq) + abs(dr) + abs(dq + dr)) / 2
+        # Reward smaller distance (closer to merging)
+        cluster_merge_score = -inter_dist
+    elif len(my_clusters) == 1:
+        # Already merged — bonus
+        cluster_merge_score = 5.0
+
+    # Breakaway penalty: count marbles with zero friendly neighbours
+    for c in my_cells:
+        if not any(board.get(nb) == player for nb in _NEIGHBOURS[c]):
+            breakaway_score += 1.0
+
+    # ── 7. Centre-of-mass ────────────────────────────────────────────────
+    my_com = _centroid(my_cells) if my_cells else (0.0, 0.0)
+    opp_com = _centroid(opp_cells) if opp_cells else (0.0, 0.0)
+    my_com_dist = (abs(my_com[0]) + abs(my_com[1]) + abs(my_com[0] + my_com[1])) / 2
+    opp_com_dist = (abs(opp_com[0]) + abs(opp_com[1]) + abs(opp_com[0] + opp_com[1])) / 2
+    com_diff = opp_com_dist - my_com_dist  # positive when we are more central
+
+    # ── Assemble score ───────────────────────────────────────────────────
     score = (
-        _W_MARBLE_COUNT * marble_diff
-        + 5 * centre_score
-        + _W_COHESION * cohesion
-        + _W_THREAT * threat
-        + abs(_W_EDGE_PENALTY) * edge_score
+        W['marble_count']   * marble_diff
+        + W['ring_position']  * ring_score
+        + W['cohesion']       * cohesion_diff
+        + W['attack_threat']  * threat_score
+        + W['danger']         * danger_score
+        + W['edge_penalty']   * edge_diff
+        + W['formation']      * formation_score
+        + W['cluster_merge']  * cluster_merge_score
+        + W['center_of_mass'] * com_diff
+        + W['breakaway']      * breakaway_score
     )
 
-    # ── 6. Endgame awareness ─────────────────────────────────────────────
-    # When the game is nearing its end (few remaining moves for either
-    # player), prioritise holding or extending a score lead and having a
-    # time advantage (the tiebreaker when scores are equal).
+    # ── 8. Endgame / move-limit awareness ────────────────────────────────
     min_remaining = None
     if remaining_moves is not None and opp_remaining_moves is not None:
         min_remaining = min(remaining_moves, opp_remaining_moves)
@@ -185,95 +469,170 @@ def evaluate(board: EngineBoard, player: EnginePlayer, *,
     elif opp_remaining_moves is not None:
         min_remaining = opp_remaining_moves
 
-    if min_remaining is not None and min_remaining <= _ENDGAME_MOVES_THRESHOLD:
-        # Urgency multiplier: as fewer moves remain the bonus grows.
-        # Range: 1.0 (at threshold) → ~2.0 (at 1 move left).
-        urgency = 1.0 + ((_ENDGAME_MOVES_THRESHOLD - min_remaining)
-                         / max(_ENDGAME_MOVES_THRESHOLD, 1))
+    if min_remaining is not None and min_remaining <= 12:
+        urgency = 1.0 + (12 - min_remaining) / 12.0
+        score += W['endgame_lead'] * marble_diff * urgency
 
-        # 6a. Amplify the score-lead bonus in the endgame.
-        #     Positive marble_diff = we are ahead → reward.
-        #     Negative marble_diff = we are behind → stronger threat/attack weight.
-        score += _W_ENDGAME_SCORE_LEAD * marble_diff * urgency
-
-        # 6b. Time-advantage bonus (tiebreaker: less time used is better).
         if my_total_time_us is not None and opp_total_time_us is not None:
             if opp_total_time_us > my_total_time_us:
-                score += _W_TIME_ADVANTAGE * urgency
+                score += W['time_advantage'] * urgency
             elif my_total_time_us > opp_total_time_us:
-                score -= _W_TIME_ADVANTAGE * urgency
+                score -= W['time_advantage'] * urgency
+
+    # ── 9. Win/loss terminal bonuses ─────────────────────────────────────
+    if opp_count <= 8:  # opponent has lost ≥6 marbles → we win
+        score += 50_000
+    if my_count <= 8:   # we have lost ≥6 marbles → we lose
+        score -= 50_000
 
     return score
 
 
-# ---------------------------------------------------------------------------
-# Move ordering heuristic (improves alpha-beta cutoffs)
-# ---------------------------------------------------------------------------
+# ═══════════════════════════════════════════════════════════════════════════
+#  MOVE ORDERING HELPERS
+# ═══════════════════════════════════════════════════════════════════════════
 
-def _move_sort_key(item: Tuple[Move, EngineBoard], player: EnginePlayer,
-                   current_board: EngineBoard) -> float:
-    """Return a key for sorting moves so promising ones come first.
+def _quick_move_score(move: Move, new_board: EngineBoard,
+                      current_board: EngineBoard,
+                      player: EnginePlayer) -> int:
+    """Fast heuristic for move ordering (higher = try first)."""
+    # Capture detection
+    opp = opponent(player)
+    opp_old = sum(1 for v in current_board.values() if v == opp)
+    opp_new = sum(1 for v in new_board.values() if v == opp)
+    capture = opp_old - opp_new
 
-    Pushes (sumito) and captures are examined first, then inline moves,
-    then side-steps.  Within each category we use a quick evaluation.
-    """
-    move, new_board = item
-    # Count marble difference – a capture will show up immediately
-    my_old = sum(1 for v in current_board.values() if v == player)
-    opp_old = sum(1 for v in current_board.values() if v != player)
-    my_new = sum(1 for v in new_board.values() if v == player)
-    opp_new = sum(1 for v in new_board.values() if v != player)
-    capture = (opp_old - opp_new)  # >0 means we pushed one off
+    score = capture * 10_000
 
-    # Higher capture priority first (negate for ascending sort)
-    return -(capture * 1000 + (0 if move.kind == 'i' else -1))
+    # Prefer inline over side-step when no capture
+    if move.kind == 'i':
+        score += 100
 
+    return score
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  TIME-MANAGEMENT CONSTANTS
+# ═══════════════════════════════════════════════════════════════════════════
+
+_OPENING_TIME_FRACTION = 0.30
+_FEW_MOVES_THRESHOLD = 10
+_FEW_MOVES_TIME_FRACTION = 0.50
+_DOMINANCE_THRESHOLD = 150
+_STABLE_DEPTH_COUNT = 3
+_TIME_CHECK_INTERVAL = 512  # check clock every N nodes
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  SEARCH ENGINE
+# ═══════════════════════════════════════════════════════════════════════════
 
 class _SearchTimeout(Exception):
-    """Raised inside the minimax search when the time budget is exhausted."""
+    """Raised inside the search when the time budget is exhausted."""
 
 
 class AIAgent:
-    """AI agent that uses iterative-deepening minimax with alpha-beta pruning.
+    """Tournament-strength Abalone AI with advanced search & evaluation.
 
-    The agent keeps deepening its search (depth 1, 2, 3, …) and always
-    retains the best move found so far.  When the time budget is nearly
-    exhausted the search is aborted and the best move from the deepest
-    *completed* iteration is returned.
-
-    Attributes
-    ----------
-    player : EnginePlayer
-        'b' or 'w' – the colour this agent controls.
-    max_depth : int
-        Hard upper limit on search depth (safeguard).
-    time_limit : float
-        Maximum wall-clock seconds the agent may spend selecting a move.
+    Features
+    --------
+    * Iterative deepening with aspiration windows
+    * Principal Variation Search (PVS) with alpha-beta pruning
+    * Zobrist-hashed transposition table
+    * Killer moves (2 slots per depth)
+    * History heuristic for quiet-move ordering
+    * Late Move Reductions (LMR)
+    * Quiescence search on capture moves
+    * Multi-phase evaluation tuned for Belgian Daisy
     """
 
-    def __init__(self, player: EnginePlayer, max_depth: int = 10,
+    def __init__(self, player: EnginePlayer, max_depth: int = 40,
                  time_limit: float = 4.5) -> None:
-        """
-        Args:
-            player: The engine player character this agent controls ('b' or 'w').
-            max_depth: Hard upper bound on search depth (default 10).
-            time_limit: Wall-clock seconds the agent is allowed to think.
-                        Defaults to 4.5 s (safe margin for a 5 s move clock).
-        """
         self.player = player
         self.max_depth = max_depth
         self.time_limit = time_limit
+
+        # Transposition table (persists across moves for the same game)
+        self._tt = _TranspositionTable(size_bits=20)
+
+        # Killer moves: 2 slots per depth
+        self._killers: Dict[int, List[Optional[str]]] = defaultdict(lambda: [None, None])
+
+        # History heuristic counters:  player -> move_notation -> score
+        self._history: Dict[str, Dict[str, int]] = defaultdict(lambda: defaultdict(int))
+
+        # Node counter for infrequent time checks
+        self._nodes: int = 0
+
         # Filled at the start of each select_move call
         self._deadline: float = 0.0
 
+        # Endgame context (set per-move)
+        self._remaining_moves: Optional[int] = None
+        self._opp_remaining_moves: Optional[int] = None
+        self._my_total_time_us: Optional[int] = None
+        self._opp_total_time_us: Optional[int] = None
+
     # ------------------------------------------------------------------
-    # Internal: time check
+    # Time management
     # ------------------------------------------------------------------
 
     def _check_time(self) -> None:
-        """Raise ``_SearchTimeout`` if the deadline has been reached."""
-        if time.perf_counter() >= self._deadline:
-            raise _SearchTimeout
+        """Raise ``_SearchTimeout`` every *_TIME_CHECK_INTERVAL* nodes."""
+        self._nodes += 1
+        if self._nodes & (_TIME_CHECK_INTERVAL - 1) == 0:
+            if time.perf_counter() >= self._deadline:
+                raise _SearchTimeout
+
+    # ------------------------------------------------------------------
+    # Move ordering
+    # ------------------------------------------------------------------
+
+    def _order_moves(
+        self,
+        moves: List[Tuple[Move, EngineBoard]],
+        board: EngineBoard,
+        player: EnginePlayer,
+        depth: int,
+        pv_notation: Optional[str] = None,
+    ) -> List[Tuple[Move, EngineBoard]]:
+        """Sort *moves* with PV-first, captures, killers, then history."""
+
+        def _key(item: Tuple[Move, EngineBoard]) -> Tuple[int, int, int]:
+            move, new_board = item
+            notation = move.notation()
+
+            # Priority bucket (lower = tried first)
+            if notation == pv_notation:
+                bucket = 0
+            else:
+                cap = _quick_move_score(move, new_board, board, player)
+                if cap > 0:
+                    bucket = 1
+                elif (notation == self._killers[depth][0] or
+                      notation == self._killers[depth][1]):
+                    bucket = 2
+                else:
+                    bucket = 3
+
+            hist = self._history[player].get(notation, 0)
+            quick = _quick_move_score(move, new_board, board, player)
+            # Sort: ascending bucket, descending quick + history
+            return (bucket, -quick, -hist)
+
+        moves.sort(key=_key)
+        return moves
+
+    def _store_killer(self, depth: int, notation: str) -> None:
+        """Store a killer move (non-capture beta-cutoff move)."""
+        k = self._killers[depth]
+        if k[0] != notation:
+            k[1] = k[0]
+            k[0] = notation
+
+    def _update_history(self, player: EnginePlayer, notation: str, depth: int) -> None:
+        """Increment the history counter for a cutoff move."""
+        self._history[player][notation] += depth * depth
 
     # ------------------------------------------------------------------
     # Public API
@@ -289,38 +648,9 @@ class AIAgent:
         my_total_time_us: Optional[int] = None,
         opp_total_time_us: Optional[int] = None,
     ) -> Optional[Tuple[Move, EngineBoard]]:
-        """Pick the best move using iterative-deepening alpha-beta search.
+        """Pick the best move using iterative-deepening PVS.
 
-        Optional endgame-context kwargs
-        --------------------------------
-        remaining_moves : How many moves this agent still has.
-        opp_remaining_moves : How many moves the opponent still has.
-        my_total_time_us : Cumulative µs this agent has spent so far.
-        opp_total_time_us : Cumulative µs the opponent has spent so far.
-
-        These values are forwarded to the evaluation function so that the
-        AI plays more aggressively or conservatively near the endgame.
-
-        The agent starts at depth 1 and progressively deepens.  It always
-        keeps the best result from the last **fully completed** depth so
-        that a move is available even when time is very short.
-
-        **Time-saving heuristics** (tournament-oriented):
-        * Opening positions (no captures yet) use a fraction of the budget.
-        * Positions with few legal moves are searched with a reduced budget.
-        * If one move is clearly dominant (large score gap over the runner-up),
-          the search stops early.
-        * If the same best move is selected for several consecutive depths,
-          the search stops early (the choice is stable).
-
-        Args:
-            board: Current board state (axial-coord dict).
-            legal_moves: Pre-computed legal moves.  If *None* the agent
-                         will generate them itself via ``generate_moves``.
-
-        Returns:
-            A ``(Move, new_board)`` tuple, or *None* when no legal move
-            exists (should not happen in a normal game).
+        Returns a ``(Move, new_board)`` tuple, or *None* if no move exists.
         """
         if legal_moves is None:
             legal_moves = generate_moves(self.player, board)
@@ -328,23 +658,24 @@ class AIAgent:
         if not legal_moves:
             return None
 
-        # If there is exactly one legal move, play it immediately.
         if len(legal_moves) == 1:
             return legal_moves[0]
 
-        # Store endgame context so that _minimax / evaluate can access it.
+        # Store endgame context
         self._remaining_moves = remaining_moves
         self._opp_remaining_moves = opp_remaining_moves
         self._my_total_time_us = my_total_time_us
         self._opp_total_time_us = opp_total_time_us
+        self._nodes = 0
 
-        # Order moves so alpha-beta prunes more aggressively
-        legal_moves.sort(key=lambda m: _move_sort_key(m, self.player, board))
-
-        # ── Adaptive time budget ──────────────────────────────────────────
+        # ── Adaptive time budget ──────────────────────────────────────
         effective_limit = self.time_limit
 
-        is_opening = _is_opening_position(board)
+        my_count = sum(1 for v in board.values() if v == self.player)
+        opp_count = sum(1 for v in board.values() if v == opponent(self.player))
+        is_opening = (my_count == _OPENING_MARBLE_COUNT and
+                      opp_count == _OPENING_MARBLE_COUNT)
+
         if is_opening:
             effective_limit = self.time_limit * _OPENING_TIME_FRACTION
         elif len(legal_moves) < _FEW_MOVES_THRESHOLD:
@@ -352,32 +683,57 @@ class AIAgent:
 
         self._deadline = time.perf_counter() + effective_limit
 
-        # Always have a fallback: the first move (best by move-ordering heuristic)
+        # Initial move ordering
+        legal_moves = self._order_moves(legal_moves, board, self.player, 0)
+
         best_move: Optional[Tuple[Move, EngineBoard]] = legal_moves[0]
+        prev_score: float = 0.0
 
         # Tracking for early-stop heuristics
         prev_best_notation: Optional[str] = None
         stable_count: int = 0
 
         for depth in range(1, self.max_depth + 1):
+            # ── Aspiration window ─────────────────────────────────────
+            if depth >= 4:
+                asp_alpha = prev_score - 50
+                asp_beta = prev_score + 50
+            else:
+                asp_alpha = -math.inf
+                asp_beta = math.inf
+
             try:
                 candidate, best_score, second_best = self._search_root(
-                    board, legal_moves, depth,
+                    board, legal_moves, depth, asp_alpha, asp_beta,
                 )
+
+                # If aspiration window failed, re-search with full window
+                if best_score <= asp_alpha or best_score >= asp_beta:
+                    candidate, best_score, second_best = self._search_root(
+                        board, legal_moves, depth, -math.inf, math.inf,
+                    )
+
                 if candidate is not None:
                     best_move = candidate
+                    prev_score = best_score
+
+                    # Reorder moves: put the best move first for next iteration
+                    best_notation = best_move[0].notation()
+                    legal_moves = self._order_moves(
+                        legal_moves, board, self.player, 0,
+                        pv_notation=best_notation,
+                    )
+
             except _SearchTimeout:
-                # Time ran out during this depth – use the result from the
-                # previous (fully completed) depth.
                 break
 
-            # ── Early-stop: dominant move (large score gap) ───────────────
+            # ── Early-stop: dominant move ─────────────────────────────
             if (second_best > -math.inf
                     and best_score - second_best >= _DOMINANCE_THRESHOLD
                     and depth >= 2):
                 break
 
-            # ── Early-stop: stable best move across depths ────────────────
+            # ── Early-stop: stable best move ──────────────────────────
             current_notation = best_move[0].notation() if best_move else None
             if current_notation == prev_best_notation:
                 stable_count += 1
@@ -388,14 +744,13 @@ class AIAgent:
             if stable_count >= _STABLE_DEPTH_COUNT and depth >= _STABLE_DEPTH_COUNT:
                 break
 
-            # If very little time is left, don't start another iteration
             if time.perf_counter() >= self._deadline - 0.05:
                 break
 
         return best_move
 
     # ------------------------------------------------------------------
-    # Root-level search (one full depth iteration)
+    # Root-level search
     # ------------------------------------------------------------------
 
     def _search_root(
@@ -403,47 +758,67 @@ class AIAgent:
         board: EngineBoard,
         legal_moves: List[Tuple[Move, EngineBoard]],
         depth: int,
+        alpha: float,
+        beta: float,
     ) -> Tuple[Optional[Tuple[Move, EngineBoard]], float, float]:
-        """Run a fixed-depth alpha-beta search and return the best move.
-
-        Returns
-        -------
-        (best_move, best_score, second_best_score)
-            *best_move* is the chosen ``(Move, Board)`` pair (or *None*).
-            *best_score* and *second_best_score* allow the caller to detect
-            dominant moves (large gap ⇒ no need to search deeper).
-        """
+        """PVS at the root level."""
         best_score = -math.inf
         second_best_score = -math.inf
         best_move: Optional[Tuple[Move, EngineBoard]] = None
-
-        alpha = -math.inf
-        beta = math.inf
+        first = True
 
         for move, new_board in legal_moves:
             self._check_time()
-            score = self._minimax(
-                new_board,
-                depth=depth - 1,
-                alpha=alpha,
-                beta=beta,
-                is_maximising=False,
-            )
+
+            if first:
+                score = -self._pvs(
+                    new_board, depth - 1, -beta, -alpha,
+                    is_maximising=False,
+                )
+                first = False
+            else:
+                # Zero-window search
+                score = -self._pvs(
+                    new_board, depth - 1, -alpha - 1, -alpha,
+                    is_maximising=False,
+                )
+                if alpha < score < beta:
+                    # Re-search with full window
+                    score = -self._pvs(
+                        new_board, depth - 1, -beta, -score,
+                        is_maximising=False,
+                    )
+
             if score > best_score:
                 second_best_score = best_score
                 best_score = score
                 best_move = (move, new_board)
             elif score > second_best_score:
                 second_best_score = score
-            alpha = max(alpha, score)
+
+            if score > alpha:
+                alpha = score
+            if alpha >= beta:
+                break
+
+        # Store best move in TT
+        if best_move is not None:
+            zhash = _zobrist_hash(board, True)
+            flag = _TT_EXACT
+            if best_score <= alpha:
+                flag = _TT_UPPER
+            elif best_score >= beta:
+                flag = _TT_LOWER
+            self._tt.store(zhash, depth, flag, best_score,
+                           best_move[0].notation())
 
         return best_move, best_score, second_best_score
 
     # ------------------------------------------------------------------
-    # Minimax with alpha-beta pruning
+    # Principal Variation Search with TT, killers, history, LMR
     # ------------------------------------------------------------------
 
-    def _minimax(
+    def _pvs(
         self,
         board: EngineBoard,
         depth: int,
@@ -451,15 +826,159 @@ class AIAgent:
         beta: float,
         is_maximising: bool,
     ) -> float:
-        """Recursive minimax with alpha-beta pruning.
+        """Negamax-style PVS with alpha-beta pruning.
 
-        Raises ``_SearchTimeout`` when the time budget is exhausted.
+        Returns the score from the perspective of the side to move.
         """
         self._check_time()
 
-        # Terminal / depth-limit check
-        if depth == 0:
-            return evaluate(
+        # ── Transposition table probe ─────────────────────────────────
+        zhash = _zobrist_hash(board, is_maximising)
+        tt_entry = self._tt.probe(zhash)
+        tt_best_notation: Optional[str] = None
+
+        if tt_entry is not None:
+            tt_depth, tt_flag, tt_score, tt_best_notation = tt_entry
+            if tt_depth >= depth:
+                if tt_flag == _TT_EXACT:
+                    return tt_score
+                elif tt_flag == _TT_LOWER and tt_score >= beta:
+                    return tt_score
+                elif tt_flag == _TT_UPPER and tt_score <= alpha:
+                    return tt_score
+
+        # ── Leaf / quiescence ─────────────────────────────────────────
+        current_player = self.player if is_maximising else opponent(self.player)
+
+        if depth <= 0:
+            return self._quiescence(board, alpha, beta, current_player, 3)
+
+        moves = generate_moves(current_player, board)
+
+        if not moves:
+            # No legal moves — effectively a loss for current player
+            return -50_000
+
+        # ── Move ordering ─────────────────────────────────────────────
+        moves = self._order_moves(moves, board, current_player, depth,
+                                  pv_notation=tt_best_notation)
+
+        best_score = -math.inf
+        best_notation: Optional[str] = None
+        first = True
+        move_index = 0
+
+        original_alpha = alpha
+
+        for move, new_board in moves:
+            self._check_time()
+            notation = move.notation()
+
+            # ── Late Move Reductions (LMR) ────────────────────────────
+            reduction = 0
+            if (not first and depth >= 3 and move_index >= 4):
+                # Check if this is a quiet move (no capture)
+                opp = opponent(current_player)
+                opp_old = sum(1 for v in board.values() if v == opp)
+                opp_new = sum(1 for v in new_board.values() if v == opp)
+                is_capture = (opp_old - opp_new) > 0
+                is_killer = (notation == self._killers[depth][0] or
+                             notation == self._killers[depth][1])
+                if not is_capture and not is_killer:
+                    reduction = 1
+
+            if first:
+                score = -self._pvs(
+                    new_board, depth - 1 - reduction, -beta, -alpha,
+                    not is_maximising,
+                )
+                # Re-search if LMR reduced and score is interesting
+                if reduction > 0 and score > alpha:
+                    score = -self._pvs(
+                        new_board, depth - 1, -beta, -alpha,
+                        not is_maximising,
+                    )
+                first = False
+            else:
+                # Zero-window scout
+                score = -self._pvs(
+                    new_board, depth - 1 - reduction, -alpha - 1, -alpha,
+                    not is_maximising,
+                )
+                # Re-search if LMR reduced
+                if reduction > 0 and score > alpha:
+                    score = -self._pvs(
+                        new_board, depth - 1, -alpha - 1, -alpha,
+                        not is_maximising,
+                    )
+                # Full re-search if scout found something
+                if alpha < score < beta:
+                    score = -self._pvs(
+                        new_board, depth - 1, -beta, -score,
+                        not is_maximising,
+                    )
+
+            if score > best_score:
+                best_score = score
+                best_notation = notation
+
+            if score > alpha:
+                alpha = score
+
+            if alpha >= beta:
+                # Beta cutoff — update killers & history
+                opp = opponent(current_player)
+                opp_old = sum(1 for v in board.values() if v == opp)
+                opp_new = sum(1 for v in new_board.values() if v == opp)
+                is_capture = (opp_old - opp_new) > 0
+                if not is_capture:
+                    self._store_killer(depth, notation)
+                self._update_history(current_player, notation, depth)
+                break
+
+            move_index += 1
+
+        # ── Store in TT ───────────────────────────────────────────────
+        if best_score <= original_alpha:
+            flag = _TT_UPPER
+        elif best_score >= beta:
+            flag = _TT_LOWER
+        else:
+            flag = _TT_EXACT
+        self._tt.store(zhash, depth, flag, best_score, best_notation)
+
+        return best_score
+
+    # ------------------------------------------------------------------
+    # Quiescence search (captures only)
+    # ------------------------------------------------------------------
+
+    def _quiescence(
+        self,
+        board: EngineBoard,
+        alpha: float,
+        beta: float,
+        player: EnginePlayer,
+        max_ply: int,
+    ) -> float:
+        """Search only capture moves to avoid the horizon effect.
+
+        Uses negamax convention: score is from *player*'s perspective.
+        """
+        self._check_time()
+
+        # Standing pat: evaluate the position
+        # We need score from player's perspective (who is "self.player")
+        if player == self.player:
+            stand_pat = evaluate(
+                board, self.player,
+                remaining_moves=self._remaining_moves,
+                opp_remaining_moves=self._opp_remaining_moves,
+                my_total_time_us=self._my_total_time_us,
+                opp_total_time_us=self._opp_total_time_us,
+            )
+        else:
+            stand_pat = -evaluate(
                 board, self.player,
                 remaining_moves=self._remaining_moves,
                 opp_remaining_moves=self._opp_remaining_moves,
@@ -467,31 +986,39 @@ class AIAgent:
                 opp_total_time_us=self._opp_total_time_us,
             )
 
-        current_player = self.player if is_maximising else opponent(self.player)
-        moves = generate_moves(current_player, board)
+        if max_ply <= 0:
+            return stand_pat
 
-        if not moves:
-            return -10_000 if is_maximising else 10_000
+        if stand_pat >= beta:
+            return stand_pat
+        if stand_pat > alpha:
+            alpha = stand_pat
 
-        # Order moves for better pruning
-        moves.sort(key=lambda m: _move_sort_key(m, current_player, board))
+        # Generate only capture moves
+        opp = opponent(player)
+        opp_count = sum(1 for v in board.values() if v == opp)
+        all_moves = generate_moves(player, board)
 
-        if is_maximising:
-            max_eval = -math.inf
-            for _, new_board in moves:
-                eval_score = self._minimax(new_board, depth - 1, alpha, beta, False)
-                max_eval = max(max_eval, eval_score)
-                alpha = max(alpha, eval_score)
-                if beta <= alpha:
-                    break
-            return max_eval
-        else:
-            min_eval = math.inf
-            for _, new_board in moves:
-                eval_score = self._minimax(new_board, depth - 1, alpha, beta, True)
-                min_eval = min(min_eval, eval_score)
-                beta = min(beta, eval_score)
-                if beta <= alpha:
-                    break
-            return min_eval
+        capture_moves = []
+        for move, new_board in all_moves:
+            new_opp_count = sum(1 for v in new_board.values() if v == opp)
+            if new_opp_count < opp_count:
+                capture_moves.append((move, new_board))
 
+        if not capture_moves:
+            return stand_pat
+
+        # Order captures by value
+        capture_moves.sort(
+            key=lambda item: -_quick_move_score(item[0], item[1], board, player)
+        )
+
+        for move, new_board in capture_moves:
+            score = -self._quiescence(new_board, -beta, -alpha,
+                                       opp, max_ply - 1)
+            if score >= beta:
+                return score
+            if score > alpha:
+                alpha = score
+
+        return alpha

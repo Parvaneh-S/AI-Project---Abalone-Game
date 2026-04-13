@@ -2951,7 +2951,7 @@ class BoardScene:
         timer_box_height = int(60 * scale_factor)
 
         # Responsive padding
-        top_padding = int(30 * scale_factor)
+        top_padding = int(10 * scale_factor)
         bottom_padding = int(170 * scale_factor)  # Increased from 120 to move timers and text upward
         right_offset = int(200 * scale_factor)  # Increased from 80 to move timers more right
 
