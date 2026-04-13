@@ -4,7 +4,7 @@ Game configuration page for the Abalone game - combines game mode and board layo
 import pygame
 from typing import Optional
 from src.ui.constants import (
-    WINDOW_W, WINDOW_H, FPS,
+    WINDOW_W, FPS,
     LANDING_BG_COLOR
 )
 
@@ -32,19 +32,24 @@ class GameModePage:
         self.selected_color = None  # 'black' or 'white'
 
         # Player 1 settings
-        self.player1_time = None  # 5, 10, or 15 seconds
-        self.player1_move_limit = None  # 30, 40, or 50 moves
+        self.player1_time = None
 
         # Player 2 settings
-        self.player2_time = None  # 5, 10, or 15 seconds
-        self.player2_move_limit = None  # 30, 40, or 50 moves
+        self.player2_time = None
+
+        # Shared move limit for both players
+        self.move_limit = None
 
         self.back_requested = False
         self.next_requested = False
 
-        # Dropdown menu states
-        self.time_options = [5, 10, 15]
-        self.move_limit_options = [30, 40, 50]
+        # Text input field states
+        self.input_fields = {
+            'p1_time': '',
+            'p2_time': '',
+            'moves': '',
+        }
+        self.active_input = None  # Which input field is currently focused
 
         # Load images
         self.standard_image: Optional[pygame.Surface] = None
@@ -57,7 +62,7 @@ class GameModePage:
         self._load_images()
         self._setup_title_button()
         self._setup_game_mode_buttons()
-        self._setup_dropdown_menus()
+        self._setup_input_fields()
         self._setup_board_buttons()
         self._setup_player_color_circles()
         self._setup_back_button()
@@ -170,76 +175,27 @@ class GameModePage:
                 'mode': i
             })
 
-    def _setup_dropdown_menus(self) -> None:
-        """Setup dropdown menus for time and move limit selection for both players."""
-        # Dropdown dimensions
-        self.dropdown_width = 120
-        self.dropdown_height = 35
-        self.dropdown_item_height = 35
+    def _setup_input_fields(self) -> None:
+        """Setup text input fields for time and move limit selection for both players."""
+        self.input_field_width = 120
+        self.input_field_height = 35
 
         # Player labels
         font_large = pygame.font.Font(None, 28)
         self.player1_label = font_large.render("Player 1", True, (255, 255, 255))
         self.player2_label = font_large.render("Player 2", True, (255, 255, 255))
 
-        # Player 1 dropdowns
-        self.p1_time_dropdown_rect = pygame.Rect(0, 0, self.dropdown_width, self.dropdown_height)
-        self.p1_move_limit_dropdown_rect = pygame.Rect(0, 0, self.dropdown_width, self.dropdown_height)
-        self.p1_time_items = []
-        self.p1_move_limit_items = []
+        # Input field rects
+        self.p1_time_input_rect = pygame.Rect(0, 0, self.input_field_width, self.input_field_height)
+        self.p2_time_input_rect = pygame.Rect(0, 0, self.input_field_width, self.input_field_height)
+        self.moves_input_rect = pygame.Rect(0, 0, self.input_field_width, self.input_field_height)
 
-        # Player 2 dropdowns
-        self.p2_time_dropdown_rect = pygame.Rect(0, 0, self.dropdown_width, self.dropdown_height)
-        self.p2_move_limit_dropdown_rect = pygame.Rect(0, 0, self.dropdown_width, self.dropdown_height)
-        self.p2_time_items = []
-        self.p2_move_limit_items = []
-
-        # Font for dropdown items
-        font_small = pygame.font.Font(None, 18)
-
-        # Create Player 1 time dropdown items
-        for time in self.time_options:
-            item_rect = pygame.Rect(0, 0, self.dropdown_width, self.dropdown_item_height)
-            item_text = font_small.render(f"{time}s", True, (255, 255, 255))
-            self.p1_time_items.append({
-                'rect': item_rect,
-                'text': item_text,
-                'value': time,
-                'color': self.button_color
-            })
-
-        # Create Player 1 move limit dropdown items
-        for limit in self.move_limit_options:
-            item_rect = pygame.Rect(0, 0, self.dropdown_width, self.dropdown_item_height)
-            item_text = font_small.render(f"{limit}", True, (255, 255, 255))
-            self.p1_move_limit_items.append({
-                'rect': item_rect,
-                'text': item_text,
-                'value': limit,
-                'color': self.button_color
-            })
-
-        # Create Player 2 time dropdown items
-        for time in self.time_options:
-            item_rect = pygame.Rect(0, 0, self.dropdown_width, self.dropdown_item_height)
-            item_text = font_small.render(f"{time}s", True, (255, 255, 255))
-            self.p2_time_items.append({
-                'rect': item_rect,
-                'text': item_text,
-                'value': time,
-                'color': self.button_color
-            })
-
-        # Create Player 2 move limit dropdown items
-        for limit in self.move_limit_options:
-            item_rect = pygame.Rect(0, 0, self.dropdown_width, self.dropdown_item_height)
-            item_text = font_small.render(f"{limit}", True, (255, 255, 255))
-            self.p2_move_limit_items.append({
-                'rect': item_rect,
-                'text': item_text,
-                'value': limit,
-                'color': self.button_color
-            })
+        # Map field names to rects for easy lookup
+        self.input_rects = {
+            'p1_time': self.p1_time_input_rect,
+            'p2_time': self.p2_time_input_rect,
+            'moves': self.moves_input_rect,
+        }
 
     def _setup_board_buttons(self) -> None:
         """Setup the board layout selection with carousel display."""
@@ -381,50 +337,29 @@ class GameModePage:
                 button['rect'].y = button_y
                 button['text_rect'].center = button['rect'].center
 
-        # Update dropdown menus position (appear below game mode buttons when selected)
-        if self.selected_mode is not None and hasattr(self, 'p1_time_dropdown_rect'):
-            # Position dropdown menus with simple, stable positioning
-            dropdown_y = 280
+        # Update input field positions (appear below game mode buttons when selected)
+        if self.selected_mode is not None and hasattr(self, 'p1_time_input_rect'):
+            # Position input fields with simple, stable positioning
+            input_y = 320
 
-            # Player 1 dropdowns - left side (side by side)
+            # Player 1 time input - left side
             p1_time_x = 80
-            p1_move_limit_x = p1_time_x + self.dropdown_width + 20
-            p1_dropdown_y = dropdown_y
+            self.p1_time_input_rect.x = p1_time_x
+            self.p1_time_input_rect.y = input_y
 
-            self.p1_time_dropdown_rect.x = p1_time_x
-            self.p1_time_dropdown_rect.y = p1_dropdown_y
+            # Player 2 time input - right side
+            p2_time_x = window_w - self.input_field_width - 80
+            self.p2_time_input_rect.x = p2_time_x
+            self.p2_time_input_rect.y = input_y
 
-            self.p1_move_limit_dropdown_rect.x = p1_move_limit_x
-            self.p1_move_limit_dropdown_rect.y = p1_dropdown_y
+            # Shared move limit input - centered
+            self.moves_input_rect.x = (window_w - self.input_field_width) // 2
+            self.moves_input_rect.y = input_y
 
-            # Update Player 1 dropdown item positions
-            for i, item in enumerate(self.p1_time_items):
-                item['rect'].x = self.p1_time_dropdown_rect.x
-                item['rect'].y = self.p1_time_dropdown_rect.y + ((i + 1) * self.dropdown_item_height)
-
-            for i, item in enumerate(self.p1_move_limit_items):
-                item['rect'].x = self.p1_move_limit_dropdown_rect.x
-                item['rect'].y = self.p1_move_limit_dropdown_rect.y + ((i + 1) * self.dropdown_item_height)
-
-            # Player 2 dropdowns - right side (side by side)
-            p2_move_limit_x = window_w - self.dropdown_width - 80
-            p2_time_x = p2_move_limit_x - self.dropdown_width - 20
-            p2_dropdown_y = dropdown_y
-
-            self.p2_time_dropdown_rect.x = p2_time_x
-            self.p2_time_dropdown_rect.y = p2_dropdown_y
-
-            self.p2_move_limit_dropdown_rect.x = p2_move_limit_x
-            self.p2_move_limit_dropdown_rect.y = p2_dropdown_y
-
-            # Update Player 2 dropdown item positions
-            for i, item in enumerate(self.p2_time_items):
-                item['rect'].x = self.p2_time_dropdown_rect.x
-                item['rect'].y = self.p2_time_dropdown_rect.y + ((i + 1) * self.dropdown_item_height)
-
-            for i, item in enumerate(self.p2_move_limit_items):
-                item['rect'].x = self.p2_move_limit_dropdown_rect.x
-                item['rect'].y = self.p2_move_limit_dropdown_rect.y + ((i + 1) * self.dropdown_item_height)
+            # Update the rects map
+            self.input_rects['p1_time'] = self.p1_time_input_rect
+            self.input_rects['p2_time'] = self.p2_time_input_rect
+            self.input_rects['moves'] = self.moves_input_rect
 
         # Board images - centered in display area with larger size
         if hasattr(self, 'image_width'):
@@ -490,9 +425,8 @@ class GameModePage:
                 elif self.next_button_rect.collidepoint(event.pos):
                     if (self.selected_mode is not None and
                         self.player1_time is not None and
-                        self.player1_move_limit is not None and
                         self.player2_time is not None and
-                        self.player2_move_limit is not None and
+                        self.move_limit is not None and
                         self.selected_board in ['standard', 'german', 'belgian'] and
                         self.selected_color in ['black', 'white']):
                         self.next_requested = True
@@ -523,28 +457,16 @@ class GameModePage:
                             self.selected_mode = button['mode']
                             break
 
-                    # Check Player 1 dropdown items
+                    # Check input field clicks
                     if self.selected_mode is not None:
-                        for item in self.p1_time_items:
-                            if item['rect'].collidepoint(event.pos):
-                                self.player1_time = item['value']
+                        clicked_input = False
+                        for field_name, rect in self.input_rects.items():
+                            if rect.collidepoint(event.pos):
+                                self.active_input = field_name
+                                clicked_input = True
                                 break
-
-                        for item in self.p1_move_limit_items:
-                            if item['rect'].collidepoint(event.pos):
-                                self.player1_move_limit = item['value']
-                                break
-
-                        # Check Player 2 dropdown items
-                        for item in self.p2_time_items:
-                            if item['rect'].collidepoint(event.pos):
-                                self.player2_time = item['value']
-                                break
-
-                        for item in self.p2_move_limit_items:
-                            if item['rect'].collidepoint(event.pos):
-                                self.player2_move_limit = item['value']
-                                break
+                        if not clicked_input:
+                            self.active_input = None
 
                     # Check board buttons (underneath the board display)
                     for button in self.board_buttons:
@@ -566,6 +488,21 @@ class GameModePage:
             if event.type == pygame.KEYDOWN:
                 if event.key == pygame.K_ESCAPE:
                     return False
+                elif self.active_input is not None:
+                    if event.key == pygame.K_BACKSPACE:
+                        self.input_fields[self.active_input] = self.input_fields[self.active_input][:-1]
+                    elif event.key == pygame.K_TAB:
+                        # Cycle through input fields
+                        field_order = ['p1_time', 'moves', 'p2_time']
+                        idx = field_order.index(self.active_input)
+                        self.active_input = field_order[(idx + 1) % len(field_order)]
+                    elif event.key == pygame.K_RETURN:
+                        self.active_input = None
+                    elif event.unicode.isdigit() and len(self.input_fields[self.active_input]) < 5:
+                        self.input_fields[self.active_input] += event.unicode
+
+                    # Update player settings from input fields
+                    self._update_player_settings_from_inputs()
 
         # Update hover states
         mouse_pos = pygame.mouse.get_pos()
@@ -594,6 +531,21 @@ class GameModePage:
 
         return None
 
+    def _update_player_settings_from_inputs(self) -> None:
+        """Update player time and move limit settings from input field text."""
+        try:
+            self.player1_time = int(self.input_fields['p1_time']) if self.input_fields['p1_time'] else None
+        except ValueError:
+            self.player1_time = None
+        try:
+            self.player2_time = int(self.input_fields['p2_time']) if self.input_fields['p2_time'] else None
+        except ValueError:
+            self.player2_time = None
+        try:
+            self.move_limit = int(self.input_fields['moves']) if self.input_fields['moves'] else None
+        except ValueError:
+            self.move_limit = None
+
     def _draw(self) -> None:
         """Draw the game configuration page."""
         self.screen.fill(self.bg_color)
@@ -609,10 +561,11 @@ class GameModePage:
             pygame.draw.rect(self.screen, (255, 255, 255), button['rect'], width=3, border_radius=10)
             self.screen.blit(button['text'], button['text_rect'])
 
-        # Draw dropdown menus if game mode is selected
+        # Draw input fields if game mode is selected
         if self.selected_mode is not None:
             label_font = pygame.font.Font(None, 24)
-            dropdown_label_font = pygame.font.Font(None, 16)
+            input_font = pygame.font.Font(None, 22)
+            placeholder_font = pygame.font.Font(None, 18)
 
             # Determine player labels based on game mode
             if self.selected_mode == 0:  # Human vs AI
@@ -626,72 +579,22 @@ class GameModePage:
                 player2_text = "Human 2"
 
             # ===== PLAYER 1 - LEFT SIDE =====
-            # Player 1 label (dynamic based on game mode)
             p1_label = label_font.render(player1_text, True, (255, 255, 255))
-            self.screen.blit(p1_label, (40, 250))
+            self.screen.blit(p1_label, (self.p1_time_input_rect.x, 280))
 
-            # Player 1 Time dropdown
-            pygame.draw.rect(self.screen, self.button_color, self.p1_time_dropdown_rect, border_radius=8)
-            pygame.draw.rect(self.screen, (255, 255, 255), self.p1_time_dropdown_rect, width=2, border_radius=8)
-            time_label = dropdown_label_font.render("Time", True, (255, 255, 255))
-            self.screen.blit(time_label, (self.p1_time_dropdown_rect.centerx - time_label.get_width() // 2,
-                                          self.p1_time_dropdown_rect.centery - time_label.get_height() // 2))
+            # Player 1 Time input
+            self._draw_input_field('p1_time', "Time Limit (Sec)", input_font, placeholder_font)
 
-            # Player 1 Time items
-            for item in self.p1_time_items:
-                item_color = (166, 112, 74) if self.player1_time == item['value'] else self.button_color
-                pygame.draw.rect(self.screen, item_color, item['rect'], border_radius=5)
-                pygame.draw.rect(self.screen, (255, 255, 255), item['rect'], width=1, border_radius=5)
-                self.screen.blit(item['text'], (item['rect'].centerx - item['text'].get_width() // 2,
-                                               item['rect'].centery - item['text'].get_height() // 2))
-
-            # Player 1 Move Limit dropdown
-            pygame.draw.rect(self.screen, self.button_color, self.p1_move_limit_dropdown_rect, border_radius=8)
-            pygame.draw.rect(self.screen, (255, 255, 255), self.p1_move_limit_dropdown_rect, width=2, border_radius=8)
-            moves_label = dropdown_label_font.render("Moves", True, (255, 255, 255))
-            self.screen.blit(moves_label, (self.p1_move_limit_dropdown_rect.centerx - moves_label.get_width() // 2,
-                                           self.p1_move_limit_dropdown_rect.centery - moves_label.get_height() // 2))
-
-            # Player 1 Move Limit items
-            for item in self.p1_move_limit_items:
-                item_color = (166, 112, 74) if self.player1_move_limit == item['value'] else self.button_color
-                pygame.draw.rect(self.screen, item_color, item['rect'], border_radius=5)
-                pygame.draw.rect(self.screen, (255, 255, 255), item['rect'], width=1, border_radius=5)
-                self.screen.blit(item['text'], (item['rect'].centerx - item['text'].get_width() // 2,
-                                               item['rect'].centery - item['text'].get_height() // 2))
+            # ===== SHARED MOVE LIMIT - CENTER =====
+            self._draw_input_field('moves', "Move Limit", input_font, placeholder_font)
 
             # ===== PLAYER 2 - RIGHT SIDE =====
-            # Player 2 label (dynamic based on game mode)
             p2_label = label_font.render(player2_text, True, (255, 255, 255))
-            self.screen.blit(p2_label, (self.screen.get_width() - 160, 250))
+            self.screen.blit(p2_label, (self.p2_time_input_rect.x, 280))
 
-            # Player 2 Time dropdown
-            pygame.draw.rect(self.screen, self.button_color, self.p2_time_dropdown_rect, border_radius=8)
-            pygame.draw.rect(self.screen, (255, 255, 255), self.p2_time_dropdown_rect, width=2, border_radius=8)
-            self.screen.blit(time_label, (self.p2_time_dropdown_rect.centerx - time_label.get_width() // 2,
-                                          self.p2_time_dropdown_rect.centery - time_label.get_height() // 2))
+            # Player 2 Time input
+            self._draw_input_field('p2_time', "Time Limit (Sec)", input_font, placeholder_font)
 
-            # Player 2 Time items
-            for item in self.p2_time_items:
-                item_color = (166, 112, 74) if self.player2_time == item['value'] else self.button_color
-                pygame.draw.rect(self.screen, item_color, item['rect'], border_radius=5)
-                pygame.draw.rect(self.screen, (255, 255, 255), item['rect'], width=1, border_radius=5)
-                self.screen.blit(item['text'], (item['rect'].centerx - item['text'].get_width() // 2,
-                                               item['rect'].centery - item['text'].get_height() // 2))
-
-            # Player 2 Move Limit dropdown
-            pygame.draw.rect(self.screen, self.button_color, self.p2_move_limit_dropdown_rect, border_radius=8)
-            pygame.draw.rect(self.screen, (255, 255, 255), self.p2_move_limit_dropdown_rect, width=2, border_radius=8)
-            self.screen.blit(moves_label, (self.p2_move_limit_dropdown_rect.centerx - moves_label.get_width() // 2,
-                                           self.p2_move_limit_dropdown_rect.centery - moves_label.get_height() // 2))
-
-            # Player 2 Move Limit items
-            for item in self.p2_move_limit_items:
-                item_color = (166, 112, 74) if self.player2_move_limit == item['value'] else self.button_color
-                pygame.draw.rect(self.screen, item_color, item['rect'], border_radius=5)
-                pygame.draw.rect(self.screen, (255, 255, 255), item['rect'], width=1, border_radius=5)
-                self.screen.blit(item['text'], (item['rect'].centerx - item['text'].get_width() // 2,
-                                               item['rect'].centery - item['text'].get_height() // 2))
 
         # Draw navigation arrows
         # Left arrow
@@ -752,6 +655,46 @@ class GameModePage:
         self.screen.blit(self.next_button_text, self.next_button_text_rect)
 
         pygame.display.flip()
+
+    def _draw_input_field(self, field_name: str, placeholder: str,
+                          input_font: pygame.font.Font, placeholder_font: pygame.font.Font) -> None:
+        """Draw a single input field with its label and current text."""
+        rect = self.input_rects[field_name]
+        is_active = self.active_input == field_name
+        text = self.input_fields[field_name]
+
+        # Background color - match the green button color used across the page
+        bg_color = (140, 160, 130) if is_active else (120, 140, 110)
+        border_color = (220, 200, 120) if is_active else (255, 255, 255)
+        border_width = 3 if is_active else 2
+
+        # Draw field background and border
+        pygame.draw.rect(self.screen, bg_color, rect, border_radius=8)
+        pygame.draw.rect(self.screen, border_color, rect, width=border_width, border_radius=8)
+
+        # Draw placeholder label above the field
+        label_surface = placeholder_font.render(placeholder, True, (200, 200, 200))
+        self.screen.blit(label_surface, (rect.x + 2, rect.y - 16))
+
+        if text:
+            # Draw the entered text
+            text_surface = input_font.render(text, True, (255, 255, 255))
+            self.screen.blit(text_surface, (rect.x + 8, rect.centery - text_surface.get_height() // 2))
+
+            # Draw blinking cursor if active
+            if is_active and pygame.time.get_ticks() % 1000 < 500:
+                cursor_x = rect.x + 8 + text_surface.get_width() + 2
+                cursor_y = rect.centery - 8
+                pygame.draw.line(self.screen, (255, 255, 255), (cursor_x, cursor_y), (cursor_x, cursor_y + 16), 2)
+        else:
+            if is_active:
+                # Draw blinking cursor at start
+                if pygame.time.get_ticks() % 1000 < 500:
+                    cursor_x = rect.x + 8
+                    cursor_y = rect.centery - 8
+                    pygame.draw.line(self.screen, (255, 255, 255), (cursor_x, cursor_y), (cursor_x, cursor_y + 16), 2)
+            else:
+                pass  # Label is already shown above the field
 
     def _render_left_arrow(self) -> pygame.Surface:
         """Render a left arrow symbol."""

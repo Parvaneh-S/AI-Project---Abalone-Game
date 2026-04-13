@@ -2,16 +2,18 @@
 Board scene for the Abalone game.
 """
 import math
+import threading
+import time
 import pygame
 from typing import Optional, List, Dict, Tuple, Set
 from src.ui.constants import FPS, BG_COLOR, CELL_RADIUS, BLACK_COLOR, WHITE_COLOR
 from src.ui.board_renderer import BoardRenderer
-from src.move_engine import (
+from src.logic.move_engine import (
     generate_moves, notation_to_axial, axial_to_notation,
     Move, Board as EngineBoard, Player as EnginePlayer, CELLS as ENGINE_CELLS,
     DIRS, cell_add, group_cells, CANONICAL_DIRS, OPPOSITE,
 )
-from src.ai_agent import AIAgent
+from src.logic.ai_agent import AIAgent
 
 
 class BoardScene:
@@ -20,21 +22,20 @@ class BoardScene:
     """
 
     def __init__(self, screen: pygame.Surface, clock: pygame.time.Clock, invert_colors: bool = False, board_layout: str = 'standard',
-                 game_mode: Optional[int] = None, player1_time: Optional[int] = None, player1_move_limit: Optional[int] = None,
-                 player2_time: Optional[int] = None, player2_move_limit: Optional[int] = None):
+                 game_mode: Optional[int] = None, player1_time: Optional[int] = None,
+                 player2_time: Optional[int] = None, move_limit: Optional[int] = None):
         """
         Initialize the board scene.
 
         Args:
             screen: Pygame surface to draw on
             clock: Pygame clock for timing
-            invert_colors: If True, swap black and white marble positions
+            invert_colors: If True, the human player controls white marbles
             board_layout: Board layout type ('standard', 'german', or 'belgian')
             game_mode: Game mode (0=Human vs AI, 1=AI vs AI, 2=Human vs Human)
             player1_time: Time per move for player 1 (seconds)
-            player1_move_limit: Move limit for player 1
             player2_time: Time per move for player 2 (seconds)
-            player2_move_limit: Move limit for player 2
+            move_limit: Move limit for both players
         """
         self.screen = screen
         self.clock = clock
@@ -65,14 +66,19 @@ class BoardScene:
         self.initial_marble_positions = None  # Store initial board state for reset
         self.show_pause_modal = False  # Whether to show pause modal
         self.show_stop_modal = False  # Whether to show stop confirmation modal
+        self.setup_mode = False  # Whether the game is in free setup mode (stop button)
 
         # Timeout (move time limit exceeded) state
         self.show_timeout_modal = False  # Whether to show the timeout game-over modal
         self.timeout_loser_color = None  # BLACK_COLOR or WHITE_COLOR – who ran out of time
+        self.timeout_winner_color = None  # Winner determined by score comparison
+        self.timeout_reason = ''  # Human-readable reason for the outcome
 
         # Move-limit exhausted state
         self.show_move_limit_modal = False  # Whether to show the move-limit game-over modal
         self.move_limit_loser_color = None  # BLACK_COLOR or WHITE_COLOR – who ran out of moves
+        self.move_limit_winner_color = None  # Winner determined by score comparison
+        self.move_limit_reason = ''  # Human-readable reason for the outcome
 
         # Win condition state (score reaches 6)
         self.show_win_modal = False  # Whether to show the win game-over modal
@@ -103,14 +109,26 @@ class BoardScene:
         self._ai_think_start: int = 0    # pygame tick when the "thinking" began
         self._ai_think_delay: int = 600  # milliseconds to pause before AI plays
 
+        # Background thread for AI computation so the UI stays responsive
+        self._ai_thread: Optional[threading.Thread] = None
+        self._ai_result: Optional[Tuple[Move, EngineBoard]] = None
+        self._ai_thread_done = False     # set True by the worker thread when finished
+
         if self.game_mode == 0:  # Human vs AI
             # The AI controls whichever colour the human did NOT pick
             ai_color = WHITE_COLOR if self.player_color == BLACK_COLOR else BLACK_COLOR
             ai_player_char = 'b' if ai_color == BLACK_COLOR else 'w'
-            self.ai_agent = AIAgent(ai_player_char)
+            # Give the AI a time budget that fits within the per-move clock.
+            # Subtract a safety margin (1.2 s) to account for the cosmetic
+            # "thinking" delay (~0.6 s) plus overhead / scheduling jitter.
+            ai_move_time = player2_time if player2_time is not None else 5
+            ai_time_budget = max(0.5, ai_move_time - 1.2)
+            self.ai_agent = AIAgent(ai_player_char, time_limit=ai_time_budget)
         elif self.game_mode == 1:  # AI vs AI
-            self.ai_agent_black = AIAgent('b')
-            self.ai_agent_white = AIAgent('w')
+            p1_time = player1_time if player1_time is not None else 5
+            p2_time = player2_time if player2_time is not None else 5
+            self.ai_agent_black = AIAgent('b', time_limit=max(0.5, p1_time - 1.2))
+            self.ai_agent_white = AIAgent('w', time_limit=max(0.5, p2_time - 1.2))
 
 
         self._setup_back_button()
@@ -129,7 +147,11 @@ class BoardScene:
         self.initial_marble_positions = self.marble_positions.copy()  # Save initial state
 
         # Move history tracking
-        self.move_history = []  # List of tuples: (move_notation, marble_color)
+        self.move_history = []  # List of tuples: (move_notation, marble_color, old_positions, time_us)
+
+        # Per-move timing (microseconds)
+        self._move_turn_start_us: int = time.perf_counter_ns() // 1000  # µs when current turn began
+        self._last_move_time_us: Optional[int] = None  # µs elapsed for the most recent move
 
         # Score tracking
         self.player_score = 0
@@ -143,16 +165,21 @@ class BoardScene:
         self._original_move_time_player = self.move_time_player
         self._original_move_time_computer = self.move_time_computer
 
-        self.total_time = 15 * 60  # 15 minutes in seconds (legacy)
+        self.total_time_limit = None  # User-configurable total game time in seconds (None = not set yet)
+        self.total_time = 0  # Current remaining total time (set when user enters value)
         self.is_game_timer_running = False
         self.start_ticks = 0
 
-        # Move limit variables - set from player configuration
-        self.player1_move_limit = player1_move_limit if player1_move_limit is not None else 40
-        self.player2_move_limit = player2_move_limit if player2_move_limit is not None else 40
-        self.max_moves_per_player = self.player1_move_limit  # For compatibility
-        self.player_moves_remaining = self.player1_move_limit
-        self.computer_moves_remaining = self.player2_move_limit
+        # Total game time input field state
+        self.total_time_input_text = ""  # Text currently in the input field
+        self.total_time_input_active = False  # Whether the input field is focused
+        self.total_time_input_confirmed = False  # Whether a valid time has been confirmed
+
+        # Move limit variables - set from shared player configuration
+        self.move_limit = move_limit if move_limit is not None else 40
+        self.max_moves_per_player = self.move_limit  # For compatibility
+        self.player_moves_remaining = self.move_limit
+        self.computer_moves_remaining = self.move_limit
 
         self._setup_timers()
 
@@ -168,11 +195,20 @@ class BoardScene:
         self.total_time_box_height = 80
         self.total_time_box_color = (180, 140, 100)  # Tan/brown color
 
+        # Input field properties for total game time
+        self.total_time_input_font = pygame.font.Font(None, 32)
+        self.total_time_input_color_active = (255, 255, 255)  # White when focused
+        self.total_time_input_color_inactive = (220, 220, 220)  # Light gray when not focused
+        self.total_time_input_border_active = (60, 140, 60)  # Green border when focused
+        self.total_time_input_border_inactive = (100, 100, 100)  # Gray border when not focused
+        self.total_time_input_rect = pygame.Rect(0, 0, 80, 30)  # Will be positioned dynamically
+
 
     def _reset_timer_for_next_turn(self) -> None:
         """Reset ONLY the per-move timer when switching to next player's turn."""
         # Reset ONLY the per-move timer, NOT the total game timer
         self.move_start_ticks = pygame.time.get_ticks()
+        self._move_turn_start_us = time.perf_counter_ns() // 1000  # reset µs timer
         self.is_game_timer_running = True
 
     def _update_timers(self) -> None:
@@ -181,11 +217,15 @@ class BoardScene:
             return
 
         # Total game time - never resets, counts continuously from game start
-        total_elapsed = (pygame.time.get_ticks() - self.start_ticks) // 1000
-        self.total_time = max(0, 15 * 60 - total_elapsed)
+        if self.total_time_limit is not None:
+            total_elapsed = (pygame.time.get_ticks() - self.start_ticks) // 1000
+            self.total_time = max(0, self.total_time_limit - total_elapsed)
+            # If total game time expired, trigger timeout for the current turn's player
+            if self.total_time <= 0 and not self.show_timeout_modal:
+                self._trigger_move_timeout(self.current_turn_color)
 
-        # Per-move timer - resets for each player's turn
-        move_elapsed = (pygame.time.get_ticks() - self.move_start_ticks) // 1000
+        # Per-move timer - resets for each player's turn (float for tenths of a second)
+        move_elapsed = (pygame.time.get_ticks() - self.move_start_ticks) / 1000.0
 
         # Store the selected times (time per move, not move limits)
         selected_time_black = 5  # Default
@@ -205,33 +245,43 @@ class BoardScene:
         # Update move timer based on whose turn it is (by color)
         if self.current_turn_color == BLACK_COLOR:
             # Black's turn - show black's time
-            current_time = max(0, selected_time_black - move_elapsed)
+            current_time = max(0.0, selected_time_black - move_elapsed)
             if self.player_color == BLACK_COLOR:
                 self.move_time_player = current_time
             else:
                 self.move_time_computer = current_time
             # Trigger timeout if time ran out
-            if current_time == 0 and not self.show_timeout_modal:
+            if current_time <= 0 and not self.show_timeout_modal:
                 self._trigger_move_timeout(BLACK_COLOR)
         else:
             # White's turn - show white's time
-            current_time = max(0, selected_time_white - move_elapsed)
+            current_time = max(0.0, selected_time_white - move_elapsed)
             if self.player_color == WHITE_COLOR:
                 self.move_time_player = current_time
             else:
                 self.move_time_computer = current_time
             # Trigger timeout if time ran out
-            if current_time == 0 and not self.show_timeout_modal:
+            if current_time <= 0 and not self.show_timeout_modal:
                 self._trigger_move_timeout(WHITE_COLOR)
 
     def _trigger_move_timeout(self, loser_color) -> None:
         """Stop the game because a player exceeded their per-move time limit.
+
+        The player who ran out of time is *not* automatically the loser.
+        Instead, the winner is determined by score comparison, and if scores
+        are equal, by total time used (less is better).
 
         Args:
             loser_color: The color constant (BLACK_COLOR / WHITE_COLOR) of the player who ran out of time.
         """
         print(f"Move timeout! {'Black' if loser_color == BLACK_COLOR else 'White'} ran out of time.")
         self.timeout_loser_color = loser_color
+
+        # Determine winner by score comparison
+        winner, reason = self._determine_winner_by_score()
+        self.timeout_winner_color = winner
+        self.timeout_reason = reason
+
         self.show_timeout_modal = True
         self.game_paused = True
         self.is_game_timer_running = False
@@ -377,16 +427,24 @@ class BoardScene:
         self.computer_turn_text = self.turn_font.render("Computer Turn", True, self.turn_text_color)
 
     def _setup_score_displays(self) -> None:
-        """Setup the score displays above and below the board."""
+        """Setup the score displays above and below the board.
+
+        White is always displayed at the top, Black at the bottom.
+        """
         # Font for score text
         self.score_font = pygame.font.Font(None, 28)
         self.score_text_color = (50, 50, 50)  # Dark gray text
 
-        # Player score label text (below board)
-        self.player_score_label_text = self.score_font.render("Your Score:", True, self.score_text_color)
+        # Top = White, Bottom = Black (always)
+        # White score label text (above board / top)
+        self.white_score_label_text = self.score_font.render("White Score:", True, self.score_text_color)
 
-        # Opponent score label text (above board)
-        self.opponent_score_label_text = self.score_font.render("Opponent Score:", True, self.score_text_color)
+        # Black score label text (below board / bottom)
+        self.black_score_label_text = self.score_font.render("Black Score:", True, self.score_text_color)
+
+        # Keep old names pointing to the new ones for compatibility
+        self.opponent_score_label_text = self.white_score_label_text
+        self.player_score_label_text = self.black_score_label_text
 
         # Circular button properties
         self.score_button_radius = 20  # Radius of circular button (40px diameter)
@@ -397,6 +455,58 @@ class BoardScene:
         # Position will be calculated dynamically in draw methods
         # based on the actual board hexagon edges
 
+
+    # ------------------------------------------------------------------
+    # Black / White display helpers (black = bottom, white = top, always)
+    # ------------------------------------------------------------------
+
+    @property
+    def _black_score(self) -> int:
+        """Score of the black player (points scored BY black, i.e. white marbles pushed off)."""
+        if self.player_color == BLACK_COLOR:
+            return self.player_score
+        else:
+            return self.opponent_score
+
+    @property
+    def _white_score(self) -> int:
+        """Score of the white player (points scored BY white, i.e. black marbles pushed off)."""
+        if self.player_color == WHITE_COLOR:
+            return self.player_score
+        else:
+            return self.opponent_score
+
+    @property
+    def _black_move_time(self) -> float:
+        """Current move timer value for the black player."""
+        if self.player_color == BLACK_COLOR:
+            return self.move_time_player
+        else:
+            return self.move_time_computer
+
+    @property
+    def _white_move_time(self) -> float:
+        """Current move timer value for the white player."""
+        if self.player_color == WHITE_COLOR:
+            return self.move_time_player
+        else:
+            return self.move_time_computer
+
+    @property
+    def _black_moves_remaining(self) -> int:
+        """Moves remaining for the black player."""
+        if self.player_color == BLACK_COLOR:
+            return self.player_moves_remaining
+        else:
+            return self.computer_moves_remaining
+
+    @property
+    def _white_moves_remaining(self) -> int:
+        """Moves remaining for the white player."""
+        if self.player_color == WHITE_COLOR:
+            return self.player_moves_remaining
+        else:
+            return self.computer_moves_remaining
 
     # Row-start column numbers per row letter, matching the move_engine's
     # standard Abalone coordinate system.
@@ -526,14 +636,37 @@ class BoardScene:
     def _maybe_ai_move(self) -> None:
         """If it is the AI's turn, start a short "thinking" delay and then play.
 
-        Called once per frame from the main ``run`` loop.  The delay gives a
-        visible pause so the human player can see the transition.
+        Called once per frame from the main ``run`` loop.  The AI computation
+        runs in a background thread so that the game loop (timers, drawing)
+        continues uninterrupted.
 
         Handles both Human vs AI (mode 0) and AI vs AI (mode 1).
         """
-        if not self.game_started or self.game_paused:
+        if not self.game_started or self.game_paused or self.setup_mode:
             return
-        if self.show_pause_modal or self.show_stop_modal or self.show_timeout_modal or self.show_win_modal or self.show_move_limit_modal:
+        if self.show_pause_modal or self.show_timeout_modal or self.show_win_modal or self.show_move_limit_modal:
+            return
+
+        # ── If a background AI thread has finished, apply its result ──
+        if self._ai_thread is not None and self._ai_thread_done:
+            result = self._ai_result
+            self._ai_thread = None
+            self._ai_result = None
+            self._ai_thread_done = False
+            self._ai_thinking = False
+
+            if result is None:
+                print("AI has no legal moves!")
+                return
+
+            move, new_board = result
+            color_name = "Black" if self.current_turn_color == BLACK_COLOR else "White"
+            print(f"AI ({color_name}) plays: {move.notation()}")
+            self._apply_engine_move(move, new_board)
+            return
+
+        # ── If an AI thread is already running, just wait ──
+        if self._ai_thread is not None:
             return
 
         # Determine which AI agent (if any) should act this turn
@@ -566,25 +699,58 @@ class BoardScene:
             self._ai_think_start = pygame.time.get_ticks()
             return  # wait for the delay to elapse
 
-        # Wait until the delay has elapsed
+        # Wait until the cosmetic delay has elapsed
         elapsed = pygame.time.get_ticks() - self._ai_think_start
         if elapsed < self._ai_think_delay:
             return
 
-        # --- Execute AI move ---
+        # --- Launch AI computation in a background thread ---
         engine_board = self._board_to_engine_state()
-        result = active_agent.select_move(engine_board, self._legal_moves_cache)
-        if result is None:
-            # No legal moves – should not normally happen
-            print("AI has no legal moves!")
-            self._ai_thinking = False
-            return
+        legal_moves = list(self._legal_moves_cache)  # snapshot for thread safety
 
-        move, new_board = result
-        color_name = "Black" if self.current_turn_color == BLACK_COLOR else "White"
-        print(f"AI ({color_name}) plays: {move.notation()}")
-        self._apply_engine_move(move, new_board)
-        self._ai_thinking = False
+        # Compute endgame context for the AI agent
+        black_us, white_us = self._get_total_times_us()
+        if self.current_turn_color == BLACK_COLOR:
+            if self.player_color == BLACK_COLOR:
+                ai_remaining = self.player_moves_remaining
+                opp_remaining = self.computer_moves_remaining
+            else:
+                ai_remaining = self.computer_moves_remaining
+                opp_remaining = self.player_moves_remaining
+            ai_time_us = black_us
+            opp_time_us = white_us
+        else:
+            if self.player_color == WHITE_COLOR:
+                ai_remaining = self.player_moves_remaining
+                opp_remaining = self.computer_moves_remaining
+            else:
+                ai_remaining = self.computer_moves_remaining
+                opp_remaining = self.player_moves_remaining
+            ai_time_us = white_us
+            opp_time_us = black_us
+
+        def _worker(agent: AIAgent, board: EngineBoard,
+                    moves: List[Tuple[Move, EngineBoard]],
+                    rem: int, opp_rem: int,
+                    my_time: int, opp_time: int) -> None:
+            self._ai_result = agent.select_move(
+                board, moves,
+                remaining_moves=rem,
+                opp_remaining_moves=opp_rem,
+                my_total_time_us=my_time,
+                opp_total_time_us=opp_time,
+            )
+            self._ai_thread_done = True
+
+        self._ai_thread_done = False
+        self._ai_result = None
+        self._ai_thread = threading.Thread(
+            target=_worker,
+            args=(active_agent, engine_board, legal_moves,
+                  ai_remaining, opp_remaining, ai_time_us, opp_time_us),
+            daemon=True,
+        )
+        self._ai_thread.start()
 
     # ------------------------------------------------------------------
     # Multi-marble selection helpers
@@ -709,6 +875,11 @@ class BoardScene:
 
     def _apply_engine_move(self, move: Move, new_engine_board: EngineBoard) -> None:
         """Apply a validated engine move: update positions, scores, history, turn."""
+        # Measure elapsed time for this move in microseconds
+        move_end_us = time.perf_counter_ns() // 1000
+        elapsed_us = move_end_us - self._move_turn_start_us
+        self._last_move_time_us = elapsed_us
+
         old_positions = self.marble_positions.copy()
         new_positions = self._engine_board_to_positions(new_engine_board)
 
@@ -736,7 +907,7 @@ class BoardScene:
 
         # Record move in history — store board snapshot for undo
         marble_color = self.current_turn_color
-        self.move_history.append((move.notation(), marble_color, old_positions))
+        self.move_history.append((move.notation(), marble_color, old_positions, elapsed_us))
 
         # ── Record last-moved marbles & direction for arrow overlay ──
         # Determine which display cells were part of this move's group
@@ -996,11 +1167,19 @@ class BoardScene:
                 button['hover'] = True
                 # Set tooltip based on button type
                 if button['type'] == 'start':
-                    self.tooltip_text = "Start"
+                    if not self.total_time_input_confirmed and not self.game_started:
+                        self.tooltip_text = "Enter total time first"
+                    else:
+                        self.tooltip_text = "Start"
                 elif button['type'] == 'pause':
                     self.tooltip_text = "Pause"
                 elif button['type'] == 'stop':
-                    self.tooltip_text = "Stop"
+                    if self.game_mode != 0:
+                        self.tooltip_text = "Setup (Human vs AI only)"
+                    elif self.setup_mode:
+                        self.tooltip_text = "In Setup Mode"
+                    else:
+                        self.tooltip_text = "Setup Mode"
                 elif button['type'] == 'reset':
                     self.tooltip_text = "Reset"
             else:
@@ -1020,6 +1199,21 @@ class BoardScene:
             if event.type == pygame.VIDEORESIZE:
                 # Window was resized, update positions
                 self._update_positions()
+
+            # Handle keyboard events for total time input field
+            if event.type == pygame.KEYDOWN and self.total_time_input_active:
+                if event.key == pygame.K_RETURN or event.key == pygame.K_KP_ENTER:
+                    # Confirm the entered value
+                    self._confirm_total_time_input()
+                elif event.key == pygame.K_BACKSPACE:
+                    self.total_time_input_text = self.total_time_input_text[:-1]
+                elif event.key == pygame.K_ESCAPE:
+                    self.total_time_input_active = False
+                else:
+                    # Only allow digits
+                    if event.unicode.isdigit() and len(self.total_time_input_text) < 4:
+                        self.total_time_input_text += event.unicode
+
             if event.type == pygame.MOUSEBUTTONDOWN:
                 # If timeout modal is showing, handle modal button clicks and block everything else
                 if self.show_timeout_modal:
@@ -1050,18 +1244,23 @@ class BoardScene:
                         return False
                     continue
 
-                # If stop modal is showing, handle modal button clicks
-                if self.show_stop_modal:
-                    self._handle_stop_modal_click(event.pos)
-                    # If yes was clicked in modal, running will be False
-                    if not self.running:
-                        return False
-                    continue
 
                 # Check if back button was clicked
                 if self.back_button_rect.collidepoint(event.pos):
                     self.go_back = True
                     return False
+
+                # Check if total time input field was clicked (only when not yet confirmed)
+                if not self.total_time_input_confirmed and self.total_time_input_rect.collidepoint(event.pos):
+                    self.total_time_input_active = True
+                    continue
+                else:
+                    # Clicked outside the input field – deactivate it
+                    if self.total_time_input_active:
+                        self.total_time_input_active = False
+                        # Auto-confirm if there is valid text
+                        if self.total_time_input_text.strip():
+                            self._confirm_total_time_input()
 
                 # Check if control buttons were clicked
                 for button in self.control_buttons:
@@ -1076,6 +1275,20 @@ class BoardScene:
                 if self.undo_button_rect.collidepoint(event.pos):
                     self._handle_undo_button_click()
                     continue
+
+                # ── Setup mode: free marble placement (any marble, any empty cell) ──
+                if self.setup_mode:
+                    marble_at_pos = self._get_marble_at_position(event.pos)
+                    if marble_at_pos is not None:
+                        # Start dragging this marble (any colour)
+                        self._setup_dragging = True
+                        self._setup_dragged_marble = marble_at_pos
+                        marble_center = self._get_marble_screen_position(marble_at_pos)
+                        self._setup_drag_offset = (
+                            event.pos[0] - marble_center[0],
+                            event.pos[1] - marble_center[1],
+                        )
+                    continue  # block normal game interaction while in setup mode
 
                 # Determine whether the human player is allowed to interact
                 # In Human vs AI (mode 0) or AI vs AI (mode 1), only allow
@@ -1137,6 +1350,19 @@ class BoardScene:
                             self._dest_to_move = {}
 
             if event.type == pygame.MOUSEBUTTONUP:
+                # ── Setup mode drop ──
+                if self.setup_mode and getattr(self, '_setup_dragging', False) and self._setup_dragged_marble is not None:
+                    drop_cell = self._get_cell_at_position(event.pos)
+                    if drop_cell is not None and drop_cell not in self.marble_positions:
+                        # Move marble to the new empty cell
+                        color = self.marble_positions.pop(self._setup_dragged_marble)
+                        self.marble_positions[drop_cell] = color
+                    # Reset setup drag state
+                    self._setup_dragging = False
+                    self._setup_dragged_marble = None
+                    self._setup_drag_offset = (0, 0)
+                    continue
+
                 if self.dragging and self.dragged_marble:
                     # Determine if the mouse moved enough to count as a drag
                     drag_threshold = 5  # pixels
@@ -1187,48 +1413,139 @@ class BoardScene:
         elif button_type == 'reset':
             self._reset_game()
 
+    def _confirm_total_time_input(self) -> None:
+        """Validate and confirm the total game time entered by the user."""
+        text = self.total_time_input_text.strip()
+        if not text:
+            return
+        try:
+            minutes = int(text)
+            if minutes <= 0:
+                print("Total game time must be a positive number!")
+                return
+            self.total_time_limit = minutes * 60  # Convert minutes to seconds
+            self.total_time = self.total_time_limit
+            self.total_time_input_confirmed = True
+            self.total_time_input_active = False
+            print(f"Total game time set to {minutes} minutes ({self.total_time_limit} seconds)")
+        except ValueError:
+            print("Invalid input for total game time!")
+
     def _start_game(self) -> None:
         """Start or resume the game."""
         if not self.game_started:
+            # Cannot start unless the user has entered a valid total game time
+            if not self.total_time_input_confirmed:
+                print("Cannot start: Please enter a total game time first!")
+                return
             # Start the game
             self.game_started = True
             self.game_paused = False
             self.is_game_timer_running = True
             self.start_ticks = pygame.time.get_ticks()  # Total game time starts here (never resets)
             self.move_start_ticks = pygame.time.get_ticks()  # Per-move timer starts here (will reset per turn)
+            self._move_turn_start_us = time.perf_counter_ns() // 1000  # µs timer for move duration
             self._recompute_legal_moves()
             print("Game started!")
+        elif self.setup_mode:
+            # Resuming from setup mode – AI plays next
+            self.setup_mode = False
+            self.game_paused = False
+            self.is_game_timer_running = True
+
+            # Discard any in-flight AI computation from before setup mode
+            self._ai_thread = None
+            self._ai_result = None
+            self._ai_thread_done = False
+            self._ai_thinking = False
+
+            # Set the turn to the AI's colour so the agent moves next
+            ai_color = WHITE_COLOR if self.player_color == BLACK_COLOR else BLACK_COLOR
+            self.current_turn_color = ai_color
+
+            # Restore timers so they continue from where they were paused
+            now = pygame.time.get_ticks()
+            paused_move_elapsed = getattr(self, '_paused_move_elapsed_ms', 0)
+            paused_total_elapsed = getattr(self, '_paused_total_elapsed_ms', 0)
+            self.move_start_ticks = now - paused_move_elapsed
+            self.start_ticks = now - paused_total_elapsed
+            self._move_turn_start_us = time.perf_counter_ns() // 1000 - paused_move_elapsed * 1000
+
+            # Reset the per-move timer for the AI's turn
+            self._reset_timer_for_next_turn()
+
+            # Recompute legal moves for the AI
+            self._recompute_legal_moves()
+
+            # Clear selection state
+            self.selected_marbles = []
+            self._dest_to_move = {}
+
+            print("Setup mode ended – AI's turn to move.")
         elif self.game_paused:
             # Resume if paused
             self.game_paused = False
             self.show_pause_modal = False
             self.is_game_timer_running = True
-            # Don't reset start_ticks - total game time keeps running
-            self.move_start_ticks = pygame.time.get_ticks()  # Reset per-move timer when resuming
+            # Restore timers so they continue from where they were paused
+            now = pygame.time.get_ticks()
+            paused_move_elapsed = getattr(self, '_paused_move_elapsed_ms', 0)
+            paused_total_elapsed = getattr(self, '_paused_total_elapsed_ms', 0)
+            self.move_start_ticks = now - paused_move_elapsed  # Continue per-move timer
+            self.start_ticks = now - paused_total_elapsed       # Continue total game timer
+            # Also restore the µs-precision move timer
+            self._move_turn_start_us = time.perf_counter_ns() // 1000 - paused_move_elapsed * 1000
             print("Game resumed!")
         else:
             print("Game is already running!")
 
     def _pause_game(self) -> None:
-        """Pause or resume the game."""
+        """Pause the game (resume is handled by the play/start button)."""
         if not self.game_paused:
-            # Pausing the game
+            # Save how much of the per-move time has already elapsed (in ms)
+            self._paused_move_elapsed_ms = pygame.time.get_ticks() - self.move_start_ticks
+            # Save how much total-game time has already elapsed (in ms)
+            self._paused_total_elapsed_ms = pygame.time.get_ticks() - self.start_ticks
+            # Pausing the game — no modal, just pause
             self.game_paused = True
-            self.show_pause_modal = True
             self.is_game_timer_running = False
             print("Game paused!")
-        else:
-            # Resuming the game (called from modal resume button)
-            self.game_paused = False
-            self.show_pause_modal = False
-            self.is_game_timer_running = True
-            self.start_ticks = pygame.time.get_ticks()
-            print("Game resumed!")
 
     def _stop_game(self) -> None:
-        """Show stop confirmation modal."""
-        self.show_stop_modal = True
-        print("Stop confirmation modal shown")
+        """Enter setup mode (only in Human vs AI mode).
+
+        Pauses timers and allows the user to freely rearrange all marbles
+        (both black and white). Pressing Start again will resume the game
+        with the AI making the next move.
+        """
+        if self.game_mode != 0:
+            print("Setup mode is only available in Human vs AI mode.")
+            return
+        if not self.game_started:
+            print("Cannot enter setup mode: game has not started.")
+            return
+        if self.setup_mode:
+            print("Already in setup mode.")
+            return
+
+        # Pause timers (same as pause)
+        self._paused_move_elapsed_ms = pygame.time.get_ticks() - self.move_start_ticks
+        self._paused_total_elapsed_ms = pygame.time.get_ticks() - self.start_ticks
+        self.game_paused = True
+        self.is_game_timer_running = False
+        self.setup_mode = True
+
+        # Clear any current selection
+        self.selected_marbles = []
+        self._dest_to_move = {}
+
+        # If the AI thread is running, we still flag setup mode;
+        # _maybe_ai_move will not apply results while setup_mode is True.
+        self._setup_dragging = False
+        self._setup_dragged_marble = None
+        self._setup_drag_offset = (0, 0)
+
+        print("Setup mode activated – rearrange marbles freely, then press Start.")
 
     def _confirm_stop_game(self) -> None:
         """Actually stop the game and go back to menu."""
@@ -1253,12 +1570,51 @@ class BoardScene:
             self.show_stop_modal = False
             print("Stop cancelled")
 
+    def _get_total_times_us(self) -> Tuple[int, int]:
+        """Return raw total µs spent by (black, white) from move history."""
+        black_us = sum(entry[3] for entry in self.move_history if entry[1] == BLACK_COLOR and len(entry) >= 4)
+        white_us = sum(entry[3] for entry in self.move_history if entry[1] == WHITE_COLOR and len(entry) >= 4)
+        return black_us, white_us
+
+    def _get_scores_by_color(self) -> Tuple[int, int]:
+        """Return (black_score, white_score) regardless of which side is 'player'."""
+        if self.player_color == BLACK_COLOR:
+            return self.player_score, self.opponent_score
+        else:
+            return self.opponent_score, self.player_score
+
+    def _determine_winner_by_score(self) -> Tuple[Optional[Tuple[int, int, int]], str]:
+        """Determine who wins when the game ends by limit / timeout.
+
+        Returns
+        -------
+        (winner_color_or_None, reason_string)
+            winner_color is BLACK_COLOR / WHITE_COLOR, or *None* for a draw.
+            reason_string is a human-readable explanation.
+        """
+        black_score, white_score = self._get_scores_by_color()
+
+        if black_score > white_score:
+            return BLACK_COLOR, f"Black wins with {black_score} vs {white_score} points!"
+        elif white_score > black_score:
+            return WHITE_COLOR, f"White wins with {white_score} vs {black_score} points!"
+
+        # Scores are equal — tiebreaker: less total time wins
+        black_us, white_us = self._get_total_times_us()
+        if black_us < white_us:
+            return BLACK_COLOR, f"Scores tied {black_score}-{white_score}. Black wins by less time used!"
+        elif white_us < black_us:
+            return WHITE_COLOR, f"Scores tied {black_score}-{white_score}. White wins by less time used!"
+
+        # Absolute tie (same score AND same time) — declare a draw
+        return None, f"It's a draw! Scores {black_score}-{white_score}, equal time used."
+
     def _get_timeout_modal_geometry(self) -> dict:
         """Get timeout game-over modal dimensions and button position."""
         window_w, window_h = self.screen.get_size()
 
-        modal_width = 460
-        modal_height = 260
+        modal_width = 560
+        modal_height = 320
         modal_x = (window_w - modal_width) // 2
         modal_y = (window_h - modal_height) // 2
 
@@ -1284,6 +1640,15 @@ class BoardScene:
             self.go_back = True
             self.running = False
 
+    def _get_total_times(self) -> Tuple[str, str]:
+        """Compute total time spent by each player from move history.
+
+        Returns:
+            (black_time_str, white_time_str) formatted in microseconds.
+        """
+        black_us, white_us = self._get_total_times_us()
+        return f"{black_us:,} µs", f"{white_us:,} µs"
+
     def _draw_timeout_modal(self) -> None:
         """Draw the move-timeout game-over modal."""
         window_w, window_h = self.screen.get_size()
@@ -1306,22 +1671,44 @@ class BoardScene:
                                                   geom['modal_y'] + 60))
         self.screen.blit(title_text, title_rect)
 
-        # Determine loser name
-        if self.timeout_loser_color == BLACK_COLOR:
-            loser_name = "Black"
-        else:
-            loser_name = "White"
+        # Determine loser name (who timed out)
+        loser_name = "Black" if self.timeout_loser_color == BLACK_COLOR else "White"
 
-        # Message
+        # Message: who timed out
         msg_font = pygame.font.Font(None, 34)
-        line1 = msg_font.render("Time's up! No move was made in time.", True, (50, 50, 50))
-        line2 = msg_font.render(f"{loser_name} player has lost!", True, (50, 50, 50))
+        line1 = msg_font.render(f"Time's up! {loser_name} ran out of time.", True, (50, 50, 50))
         line1_rect = line1.get_rect(center=(geom['modal_x'] + geom['modal_width'] // 2,
-                                             geom['modal_y'] + 130))
-        line2_rect = line2.get_rect(center=(geom['modal_x'] + geom['modal_width'] // 2,
-                                             geom['modal_y'] + 165))
+                                             geom['modal_y'] + 120))
         self.screen.blit(line1, line1_rect)
+
+        # Winner determined by score (with time tiebreaker)
+        winner_color = getattr(self, 'timeout_winner_color', None)
+        reason = getattr(self, 'timeout_reason', '')
+        result_font = pygame.font.Font(None, 32)
+        if winner_color is not None:
+            winner_name = "Black" if winner_color == BLACK_COLOR else "White"
+            line2 = result_font.render(reason, True, (50, 50, 50))
+        else:
+            line2 = result_font.render(reason, True, (50, 50, 50))
+        line2_rect = line2.get_rect(center=(geom['modal_x'] + geom['modal_width'] // 2,
+                                             geom['modal_y'] + 155))
         self.screen.blit(line2, line2_rect)
+
+        # Score line
+        black_score, white_score = self._get_scores_by_color()
+        score_font = pygame.font.Font(None, 28)
+        score_line = score_font.render(f"Score — Black: {black_score}  |  White: {white_score}", True, (80, 80, 80))
+        score_rect = score_line.get_rect(center=(geom['modal_x'] + geom['modal_width'] // 2,
+                                                  geom['modal_y'] + 190))
+        self.screen.blit(score_line, score_rect)
+
+        # Total time per player
+        black_time, white_time = self._get_total_times()
+        time_font = pygame.font.Font(None, 28)
+        time_line = time_font.render(f"Time — Black: {black_time}  |  White: {white_time}", True, (80, 80, 80))
+        time_rect = time_line.get_rect(center=(geom['modal_x'] + geom['modal_width'] // 2,
+                                                geom['modal_y'] + 220))
+        self.screen.blit(time_line, time_rect)
 
         # OK button
         mouse_pos = pygame.mouse.get_pos()
@@ -1341,12 +1728,22 @@ class BoardScene:
     def _trigger_move_limit_loss(self, loser_color) -> None:
         """Stop the game because a player exhausted their move limit.
 
+        The player who ran out of moves is *not* automatically the loser.
+        Instead, the winner is determined by score comparison, and if scores
+        are equal, by total time used (less is better).
+
         Args:
             loser_color: The color constant (BLACK_COLOR / WHITE_COLOR) of the player who has no moves left.
         """
         loser_name = "Black" if loser_color == BLACK_COLOR else "White"
-        print(f"Move limit reached! {loser_name} has no remaining moves and loses.")
+        print(f"Move limit reached! {loser_name} has no remaining moves.")
         self.move_limit_loser_color = loser_color
+
+        # Determine winner by score comparison
+        winner, reason = self._determine_winner_by_score()
+        self.move_limit_winner_color = winner
+        self.move_limit_reason = reason
+
         self.show_move_limit_modal = True
         self.game_paused = True
         self.is_game_timer_running = False
@@ -1355,8 +1752,8 @@ class BoardScene:
         """Get move-limit game-over modal dimensions and button position."""
         window_w, window_h = self.screen.get_size()
 
-        modal_width = 460
-        modal_height = 260
+        modal_width = 560
+        modal_height = 320
         modal_x = (window_w - modal_width) // 2
         modal_y = (window_h - modal_height) // 2
 
@@ -1403,20 +1800,40 @@ class BoardScene:
                                                   geom['modal_y'] + 60))
         self.screen.blit(title_text, title_rect)
 
-        # Determine loser / winner names
+        # Who ran out of moves
         loser_name = "Black" if self.move_limit_loser_color == BLACK_COLOR else "White"
-        winner_name = "White" if self.move_limit_loser_color == BLACK_COLOR else "Black"
 
-        # Message
+        # Message: who ran out of moves
         msg_font = pygame.font.Font(None, 34)
         line1 = msg_font.render(f"{loser_name} has no remaining moves!", True, (50, 50, 50))
-        line2 = msg_font.render(f"{winner_name} wins the game!", True, (50, 50, 50))
         line1_rect = line1.get_rect(center=(geom['modal_x'] + geom['modal_width'] // 2,
-                                             geom['modal_y'] + 130))
-        line2_rect = line2.get_rect(center=(geom['modal_x'] + geom['modal_width'] // 2,
-                                             geom['modal_y'] + 165))
+                                             geom['modal_y'] + 120))
         self.screen.blit(line1, line1_rect)
+
+        # Winner determined by score (with time tiebreaker)
+        winner_color = getattr(self, 'move_limit_winner_color', None)
+        reason = getattr(self, 'move_limit_reason', '')
+        result_font = pygame.font.Font(None, 32)
+        line2 = result_font.render(reason, True, (50, 50, 50))
+        line2_rect = line2.get_rect(center=(geom['modal_x'] + geom['modal_width'] // 2,
+                                             geom['modal_y'] + 155))
         self.screen.blit(line2, line2_rect)
+
+        # Score line
+        black_score, white_score = self._get_scores_by_color()
+        score_font = pygame.font.Font(None, 28)
+        score_line = score_font.render(f"Score — Black: {black_score}  |  White: {white_score}", True, (80, 80, 80))
+        score_rect = score_line.get_rect(center=(geom['modal_x'] + geom['modal_width'] // 2,
+                                                  geom['modal_y'] + 190))
+        self.screen.blit(score_line, score_rect)
+
+        # Total time per player
+        black_time, white_time = self._get_total_times()
+        time_font = pygame.font.Font(None, 28)
+        time_line = time_font.render(f"Time — Black: {black_time}  |  White: {white_time}", True, (80, 80, 80))
+        time_rect = time_line.get_rect(center=(geom['modal_x'] + geom['modal_width'] // 2,
+                                                geom['modal_y'] + 220))
+        self.screen.blit(time_line, time_rect)
 
         # OK button
         mouse_pos = pygame.mouse.get_pos()
@@ -1450,8 +1867,8 @@ class BoardScene:
         """Get win game-over modal dimensions and button position."""
         window_w, window_h = self.screen.get_size()
 
-        modal_width = 460
-        modal_height = 260
+        modal_width = 560
+        modal_height = 320
         modal_x = (window_w - modal_width) // 2
         modal_y = (window_h - modal_height) // 2
 
@@ -1516,6 +1933,14 @@ class BoardScene:
         self.screen.blit(line1, line1_rect)
         self.screen.blit(line2, line2_rect)
 
+        # Total time per player
+        black_time, white_time = self._get_total_times()
+        time_font = pygame.font.Font(None, 28)
+        time_line = time_font.render(f"Black total: {black_time}  |  White total: {white_time}", True, (80, 80, 80))
+        time_rect = time_line.get_rect(center=(geom['modal_x'] + geom['modal_width'] // 2,
+                                                geom['modal_y'] + 205))
+        self.screen.blit(time_line, time_rect)
+
         # OK button
         mouse_pos = pygame.mouse.get_pos()
         ok_color = (184, 202, 176) if geom['ok_button'].collidepoint(mouse_pos) else (164, 182, 156)
@@ -1544,18 +1969,26 @@ class BoardScene:
             self.show_timeout_modal = False
             self.timeout_loser_color = None
             self.is_game_timer_running = False
-            self.total_time = 15 * 60
+            self.total_time = 0
+            self.total_time_input_text = ""
+            self.total_time_input_active = False
+            self.total_time_input_confirmed = False
+            self.total_time_limit = None
+            self.game_started = False
             self.move_time_computer = 5
             self.move_time_player = 5
-            self.player_moves_remaining = self.player1_move_limit
-            self.computer_moves_remaining = self.player2_move_limit
+            self.player_moves_remaining = self.move_limit
+            self.computer_moves_remaining = self.move_limit
             self.selected_marbles = []
             self._dest_to_move = {}
             self._legal_moves_cache = []
             self._last_moved_cells = []
             self._last_move_direction = None
             self._last_move_color = None
+            self._last_move_time_us = None
+            self._move_turn_start_us = time.perf_counter_ns() // 1000
             self.current_turn_color = BLACK_COLOR
+            self.setup_mode = False
             self._ai_thinking = False
             if self.game_started:
                 self._recompute_legal_moves()
@@ -1636,6 +2069,14 @@ class BoardScene:
             # Resume game
             self.game_paused = False
             self.show_pause_modal = False
+            self.is_game_timer_running = True
+            # Restore timers so they continue from where they were paused
+            now = pygame.time.get_ticks()
+            paused_move_elapsed = getattr(self, '_paused_move_elapsed_ms', 0)
+            paused_total_elapsed = getattr(self, '_paused_total_elapsed_ms', 0)
+            self.move_start_ticks = now - paused_move_elapsed
+            self.start_ticks = now - paused_total_elapsed
+            self._move_turn_start_us = time.perf_counter_ns() // 1000 - paused_move_elapsed * 1000
             print("Game resumed!")
         elif geom['quit_button'].collidepoint(pos):
             # Quit to menu
@@ -1653,10 +2094,10 @@ class BoardScene:
             print("Cannot undo while game is paused. Resume first.")
             return
 
-        # History entries are (move_notation, marble_color, old_positions_snapshot)
+        # History entries are (move_notation, marble_color, old_positions_snapshot, time_us)
         entry = self.move_history.pop()
-        if len(entry) == 3:
-            move_notation, marble_color, old_positions = entry
+        if len(entry) >= 3:
+            move_notation, marble_color, old_positions = entry[0], entry[1], entry[2]
             # Recompute score delta: count opponent marbles now vs in snapshot
             opp_color = WHITE_COLOR if marble_color == BLACK_COLOR else BLACK_COLOR
             old_opp_count = sum(1 for c in old_positions.values() if c == opp_color)
@@ -1678,6 +2119,11 @@ class BoardScene:
             self._last_moved_cells = []
             self._last_move_direction = None
             self._last_move_color = None
+            # Update last move time to the previous move's time (or clear it)
+            if self.move_history and len(self.move_history[-1]) >= 4:
+                self._last_move_time_us = self.move_history[-1][3]
+            else:
+                self._last_move_time_us = None
             self._recompute_legal_moves()
             print(f"Undo successful! Reversed move: {move_notation}")
         else:
@@ -1829,9 +2275,9 @@ class BoardScene:
         # Draw the board with current marble positions
         self._draw_board_and_marbles()
 
-        # Draw the score displays above and below the board
-        self._draw_opponent_score_display()  # Above board
-        self._draw_player_score_display()    # Below board
+        # Draw the score displays above and below the board (white=top, black=bottom)
+        self._draw_opponent_score_display()  # White score (top)
+        self._draw_player_score_display()    # Black score (bottom)
 
         # Draw timers
         self._draw_timers()
@@ -1843,10 +2289,15 @@ class BoardScene:
         pygame.draw.rect(self.screen, self.horizontal_box_color, self.horizontal_box_rect)
 
         # Draw turn indicator text in the center of the horizontal box
-        is_human = (self.current_turn_color == self.player_color)
-        turn_text = self.human_turn_text if is_human else self.computer_turn_text
-        turn_text_rect = turn_text.get_rect(center=self.horizontal_box_rect.center)
-        self.screen.blit(turn_text, turn_text_rect)
+        if self.setup_mode:
+            setup_text = self.turn_font.render("Setup Mode", True, (0, 140, 140))
+            setup_text_rect = setup_text.get_rect(center=self.horizontal_box_rect.center)
+            self.screen.blit(setup_text, setup_text_rect)
+        else:
+            is_human = (self.current_turn_color == self.player_color)
+            turn_text = self.human_turn_text if is_human else self.computer_turn_text
+            turn_text_rect = turn_text.get_rect(center=self.horizontal_box_rect.center)
+            self.screen.blit(turn_text, turn_text_rect)
 
         # Draw the move history text
         self._draw_move_history()
@@ -1881,6 +2332,24 @@ class BoardScene:
                 # Draw marble
                 pygame.draw.circle(self.screen, color, (drag_x, drag_y), CELL_RADIUS)
 
+        # Draw setup-mode dragged marble on top
+        if self.setup_mode and getattr(self, '_setup_dragging', False) and self._setup_dragged_marble is not None:
+            mouse_pos = pygame.mouse.get_pos()
+            drag_x = mouse_pos[0] - self._setup_drag_offset[0]
+            drag_y = mouse_pos[1] - self._setup_drag_offset[1]
+            color = self.marble_positions.get(self._setup_dragged_marble)
+            if color:
+                # Draw highlight ring (cyan to indicate setup mode)
+                pygame.draw.circle(self.screen, (0, 200, 200), (drag_x, drag_y), CELL_RADIUS + 5, 4)
+                # Draw shadow
+                pygame.draw.circle(self.screen, (120, 120, 120), (drag_x, drag_y), CELL_RADIUS + 1)
+                # Draw marble
+                pygame.draw.circle(self.screen, color, (drag_x, drag_y), CELL_RADIUS)
+
+        # Draw setup mode banner if active
+        if self.setup_mode:
+            self._draw_setup_mode_banner()
+
         # Draw pause modal if showing
         if self.show_pause_modal:
             self._draw_pause_modal()
@@ -1889,9 +2358,6 @@ class BoardScene:
         if self.tooltip_text:
             self._draw_tooltip()
 
-        # Draw stop confirmation modal if showing
-        if self.show_stop_modal:
-            self._draw_stop_modal()
 
         # Draw timeout game-over modal if showing
         if self.show_timeout_modal:
@@ -1906,6 +2372,21 @@ class BoardScene:
             self._draw_win_modal()
 
         pygame.display.flip()
+
+    def _draw_setup_mode_banner(self) -> None:
+        """Draw a semi-transparent banner at the top indicating setup mode."""
+        window_w, _ = self.screen.get_size()
+        available_width = window_w - self.sidebar_width
+
+        banner_height = 40
+        banner_surface = pygame.Surface((available_width, banner_height), pygame.SRCALPHA)
+        banner_surface.fill((0, 160, 160, 180))  # Teal, semi-transparent
+        self.screen.blit(banner_surface, (0, 60))
+
+        font = pygame.font.Font(None, 30)
+        text = font.render("SETUP MODE – Drag any marble to rearrange, then press Start", True, (255, 255, 255))
+        text_rect = text.get_rect(center=(available_width // 2, 60 + banner_height // 2))
+        self.screen.blit(text, text_rect)
 
     def _draw_tooltip(self) -> None:
         """Draw tooltip at mouse position."""
@@ -2175,13 +2656,13 @@ class BoardScene:
         col_width = self.move_history_rect.width // 2
         col_right_x = col_left_x + col_width  # Right column start
 
-        # Separate moves by color
-        black_moves = [entry[0] for entry in self.move_history if entry[1] == BLACK_COLOR]
-        white_moves = [entry[0] for entry in self.move_history if entry[1] == WHITE_COLOR]
+        # Separate moves by color, keeping (notation, time_us) pairs
+        black_moves = [(entry[0], entry[3] if len(entry) >= 4 else None) for entry in self.move_history if entry[1] == BLACK_COLOR]
+        white_moves = [(entry[0], entry[3] if len(entry) >= 4 else None) for entry in self.move_history if entry[1] == WHITE_COLOR]
 
         # Starting position for move list (below the header)
         list_start_y = self.move_history_y + self.move_history_height + 5
-        line_height = 22  # Height for each move entry
+        line_height = 28  # Height for each move entry (includes room for time)
 
         # Calculate the area available for move history
         available_height = self.undo_section_y - list_start_y - 10
@@ -2194,18 +2675,18 @@ class BoardScene:
         left_padding = 8  # Small padding from the left edge of each column
 
         # Draw black moves in left column (black font, left-aligned)
-        for i, notation in enumerate(black_to_show):
+        for i, (notation, move_time_us) in enumerate(black_to_show):
             entry_y = list_start_y + i * line_height
             move_text = move_font.render(notation, True, black_text_color)
             tx = col_left_x + left_padding
-            ty = entry_y + (line_height - move_text.get_height()) // 2
+            ty = entry_y + 1
             self.screen.blit(move_text, (tx, ty))
 
         # Draw white moves in right column (white font with outline, left-aligned)
-        for i, notation in enumerate(white_to_show):
+        for i, (notation, move_time_us) in enumerate(white_to_show):
             entry_y = list_start_y + i * line_height
             tx = col_right_x + left_padding
-            ty = entry_y + (line_height - move_font.get_height()) // 2
+            ty = entry_y + 1
 
             # Draw dark outline by rendering text offset in each direction
             outline_surf = move_font.render(notation, True, white_outline_color)
@@ -2215,6 +2696,7 @@ class BoardScene:
             # Draw white text on top
             white_surf = move_font.render(notation, True, white_text_color)
             self.screen.blit(white_surf, (tx, ty))
+
 
     def _draw_undo_section(self) -> None:
         """Draw the undo section with text and circular button."""
@@ -2246,7 +2728,7 @@ class BoardScene:
             self.screen.blit(self.undo_icon_scaled, icon_rect)
 
     def _draw_opponent_score_display(self) -> None:
-        """Draw the opponent score display above the board."""
+        """Draw the white player score display above the board (top = white, always)."""
         from src.ui.constants import CELL_MARGIN, RIM_WIDTH, CELL_RADIUS
         import math
 
@@ -2268,7 +2750,7 @@ class BoardScene:
         score_display_bottom_y = int(hexagon_top_y) - gap_above_hexagon
 
         # Calculate score display y (top of the text)
-        score_display_y = score_display_bottom_y - self.opponent_score_label_text.get_height()
+        score_display_y = score_display_bottom_y - self.white_score_label_text.get_height()
 
         # Calculate horizontal center based on board center
         window_w, _ = self.screen.get_size()
@@ -2277,30 +2759,30 @@ class BoardScene:
 
         # Calculate positions for text and button
         text_button_spacing = 15  # Space between text and button
-        total_width = self.opponent_score_label_text.get_width() + text_button_spacing + (self.score_button_radius * 2)
+        total_width = self.white_score_label_text.get_width() + text_button_spacing + (self.score_button_radius * 2)
 
         # Center the entire score display
         start_x = board_center_x - (total_width // 2)
         text_x = start_x
-        button_center_x = start_x + self.opponent_score_label_text.get_width() + text_button_spacing + self.score_button_radius
+        button_center_x = start_x + self.white_score_label_text.get_width() + text_button_spacing + self.score_button_radius
 
-        # Draw "Opponent Score:" text
-        self.screen.blit(self.opponent_score_label_text, (text_x, score_display_y))
+        # Draw "White Score:" text
+        self.screen.blit(self.white_score_label_text, (text_x, score_display_y))
 
         # Draw circular button with score
-        button_center = (button_center_x, score_display_y + self.opponent_score_label_text.get_height() // 2)
+        button_center = (button_center_x, score_display_y + self.white_score_label_text.get_height() // 2)
 
         # Draw white circle with gray border
         pygame.draw.circle(self.screen, self.score_button_bg_color, button_center, self.score_button_radius)
         pygame.draw.circle(self.screen, self.score_button_border_color, button_center, self.score_button_radius, 2)
 
         # Draw score text in the center of the circle
-        score_text = self.score_font.render(str(self.opponent_score), True, self.score_button_text_color)
+        score_text = self.score_font.render(str(self._white_score), True, self.score_button_text_color)
         score_text_rect = score_text.get_rect(center=button_center)
         self.screen.blit(score_text, score_text_rect)
 
     def _draw_player_score_display(self) -> None:
-        """Draw the player score display below the board."""
+        """Draw the black player score display below the board (bottom = black, always)."""
         from src.ui.constants import CELL_MARGIN, RIM_WIDTH, CELL_RADIUS
         import math
 
@@ -2327,33 +2809,47 @@ class BoardScene:
 
         # Calculate positions for text and button
         text_button_spacing = 15  # Space between text and button
-        total_width = self.player_score_label_text.get_width() + text_button_spacing + (self.score_button_radius * 2)
+        total_width = self.black_score_label_text.get_width() + text_button_spacing + (self.score_button_radius * 2)
 
         # Center the entire score display
         start_x = board_center_x - (total_width // 2)
         text_x = start_x
-        button_center_x = start_x + self.player_score_label_text.get_width() + text_button_spacing + self.score_button_radius
+        button_center_x = start_x + self.black_score_label_text.get_width() + text_button_spacing + self.score_button_radius
 
-        # Draw "Your Score:" text
-        self.screen.blit(self.player_score_label_text, (text_x, score_display_y))
+        # Draw "Black Score:" text
+        self.screen.blit(self.black_score_label_text, (text_x, score_display_y))
 
         # Draw circular button with score
-        button_center = (button_center_x, score_display_y + self.player_score_label_text.get_height() // 2)
+        button_center = (button_center_x, score_display_y + self.black_score_label_text.get_height() // 2)
 
         # Draw white circle with gray border
         pygame.draw.circle(self.screen, self.score_button_bg_color, button_center, self.score_button_radius)
         pygame.draw.circle(self.screen, self.score_button_border_color, button_center, self.score_button_radius, 2)
 
         # Draw score text in the center of the circle
-        score_text = self.score_font.render(str(self.player_score), True, self.score_button_text_color)
+        score_text = self.score_font.render(str(self._black_score), True, self.score_button_text_color)
         score_text_rect = score_text.get_rect(center=button_center)
         self.screen.blit(score_text, score_text_rect)
 
     def _draw_control_buttons(self) -> None:
         """Draw the control buttons (start, pause, stop, reset) with icons."""
         for button in self.control_buttons:
-            # Choose color based on hover state
-            color = self.button_hover_color if button['hover'] else self.button_bg_color
+            # Determine if start button should appear disabled
+            is_start_disabled = (button['type'] == 'start' and not self.total_time_input_confirmed and not self.game_started)
+            # Stop button is disabled when not in Human vs AI mode
+            is_stop_disabled = (button['type'] == 'stop' and self.game_mode != 0)
+            # Stop button highlighted when setup mode is active
+            is_stop_active = (button['type'] == 'stop' and self.setup_mode)
+
+            if is_start_disabled or is_stop_disabled:
+                # Draw disabled state (grayed out)
+                color = (180, 180, 180)  # Gray
+            elif is_stop_active:
+                # Highlight the stop button in teal when setup mode is on
+                color = (0, 180, 180) if button['hover'] else (0, 160, 160)
+            else:
+                # Choose color based on hover state
+                color = self.button_hover_color if button['hover'] else self.button_bg_color
 
             # Draw circular button background
             center = button['rect'].center
@@ -2361,8 +2857,9 @@ class BoardScene:
             pygame.draw.circle(self.screen, color, center, radius)
 
             # Draw button icon based on type
+            icon_color = (160, 160, 160) if (is_start_disabled or is_stop_disabled) else self.button_icon_color
             if button['type'] == 'start':
-                self._draw_play_icon(center, radius)
+                self._draw_play_icon(center, radius, icon_color)
             elif button['type'] == 'pause':
                 self._draw_pause_icon(center, radius)
             elif button['type'] == 'stop':
@@ -2376,8 +2873,10 @@ class BoardScene:
                 else:
                     self._draw_reset_icon(center, radius)
 
-    def _draw_play_icon(self, center: tuple, radius: int) -> None:
+    def _draw_play_icon(self, center: tuple, radius: int, icon_color: tuple = None) -> None:
         """Draw a play/start triangle icon."""
+        if icon_color is None:
+            icon_color = self.button_icon_color
         # Triangle pointing right
         size = radius * 0.5
         points = [
@@ -2385,7 +2884,7 @@ class BoardScene:
             (center[0] - size * 0.4, center[1] + size),
             (center[0] + size * 0.8, center[1])
         ]
-        pygame.draw.polygon(self.screen, self.button_icon_color, points)
+        pygame.draw.polygon(self.screen, icon_color, points)
 
     def _draw_pause_icon(self, center: tuple, radius: int) -> None:
         """Draw a pause (two vertical bars) icon."""
@@ -2446,8 +2945,8 @@ class BoardScene:
         # Scale boxes based on available width
         scale_factor = max(0.7, min(available_width / 1200, 1.2))  # Scale between 0.7x and 1.2x
 
-        total_box_width = int(200 * scale_factor)
-        total_box_height = int(70 * scale_factor)
+        total_box_width = int(220 * scale_factor)
+        total_box_height = int(80 * scale_factor)
         timer_box_width = int(120 * scale_factor)
         timer_box_height = int(60 * scale_factor)
 
@@ -2463,19 +2962,53 @@ class BoardScene:
         pygame.draw.rect(self.screen, self.total_time_box_color, total_box_rect, border_radius=10)
         pygame.draw.rect(self.screen, (0, 0, 0), total_box_rect, width=2, border_radius=10)
 
-        # Draw total time text with responsive font
         label_font = pygame.font.Font(None, int(20 * scale_factor))
-        total_label = label_font.render("Total Game Time:", True, self.timer_text_color)
-        total_label_rect = total_label.get_rect(center=(total_box_rect.centerx, total_box_rect.centery - int(15 * scale_factor)))
-        self.screen.blit(total_label, total_label_rect)
-
-        # Draw total time value
         value_font = pygame.font.Font(None, int(38 * scale_factor))
-        minutes = self.total_time // 60
-        seconds = self.total_time % 60
-        total_value = value_font.render(f"{minutes}:{seconds:02d}", True, self.timer_text_color)
-        total_value_rect = total_value.get_rect(center=(total_box_rect.centerx, total_box_rect.centery + int(15 * scale_factor)))
-        self.screen.blit(total_value, total_value_rect)
+
+        if self.total_time_input_confirmed:
+            # Show label and countdown
+            total_label = label_font.render("Total Game Time:", True, self.timer_text_color)
+            total_label_rect = total_label.get_rect(center=(total_box_rect.centerx, total_box_rect.centery - int(15 * scale_factor)))
+            self.screen.blit(total_label, total_label_rect)
+
+            minutes = self.total_time // 60
+            seconds = self.total_time % 60
+            total_value = value_font.render(f"{minutes}:{seconds:02d}", True, self.timer_text_color)
+            total_value_rect = total_value.get_rect(center=(total_box_rect.centerx, total_box_rect.centery + int(15 * scale_factor)))
+            self.screen.blit(total_value, total_value_rect)
+        else:
+            # Show label and editable input field
+            total_label = label_font.render("Total Game Time (min):", True, self.timer_text_color)
+            total_label_rect = total_label.get_rect(center=(total_box_rect.centerx, total_box_rect.centery - int(15 * scale_factor)))
+            self.screen.blit(total_label, total_label_rect)
+
+            # Draw input field
+            input_w = int(70 * scale_factor)
+            input_h = int(28 * scale_factor)
+            input_x = total_box_rect.centerx - input_w // 2
+            input_y = total_box_rect.centery + int(5 * scale_factor)
+            self.total_time_input_rect = pygame.Rect(input_x, input_y, input_w, input_h)
+
+            bg_color = self.total_time_input_color_active if self.total_time_input_active else self.total_time_input_color_inactive
+            border_color = self.total_time_input_border_active if self.total_time_input_active else self.total_time_input_border_inactive
+            pygame.draw.rect(self.screen, bg_color, self.total_time_input_rect, border_radius=5)
+            pygame.draw.rect(self.screen, border_color, self.total_time_input_rect, width=2, border_radius=5)
+
+            # Draw text inside input field (or placeholder)
+            input_font = pygame.font.Font(None, int(28 * scale_factor))
+            if self.total_time_input_text:
+                input_surface = input_font.render(self.total_time_input_text, True, (0, 0, 0))
+            else:
+                input_surface = input_font.render("--", True, (150, 150, 150))
+            input_surface_rect = input_surface.get_rect(center=self.total_time_input_rect.center)
+            self.screen.blit(input_surface, input_surface_rect)
+
+            # Draw blinking cursor when active
+            if self.total_time_input_active and (pygame.time.get_ticks() // 500) % 2 == 0:
+                cursor_x = input_surface_rect.right + 2
+                cursor_y1 = self.total_time_input_rect.centery - int(10 * scale_factor)
+                cursor_y2 = self.total_time_input_rect.centery + int(10 * scale_factor)
+                pygame.draw.line(self.screen, (0, 0, 0), (cursor_x, cursor_y1), (cursor_x, cursor_y2), 2)
 
         # Draw first 5 sec timer on TOP RIGHT (under total time)
         timer1_box_x = board_center_x + right_offset
@@ -2484,8 +3017,8 @@ class BoardScene:
         pygame.draw.rect(self.screen, (211, 211, 211), timer1_box_rect, border_radius=8)
         pygame.draw.rect(self.screen, (0, 0, 0), timer1_box_rect, width=2, border_radius=8)
 
-        # Draw only the timer value (5 sec) centered in box
-        timer1_value = value_font.render(f"{self.move_time_computer}s", True, self.timer_text_color)
+        # Draw only the timer value (5 sec) centered in box – WHITE's time (top)
+        timer1_value = value_font.render(f"{self._white_move_time:.1f}s", True, self.timer_text_color)
         timer1_value_rect = timer1_value.get_rect(center=timer1_box_rect.center)
         self.screen.blit(timer1_value, timer1_value_rect)
 
@@ -2496,23 +3029,23 @@ class BoardScene:
         pygame.draw.rect(self.screen, (211, 211, 211), timer2_box_rect, border_radius=8)
         pygame.draw.rect(self.screen, (0, 0, 0), timer2_box_rect, width=2, border_radius=8)
 
-        # Draw only the timer value (5 sec) centered in box
-        timer2_value = value_font.render(f"{self.move_time_player}s", True, self.timer_text_color)
+        # Draw only the timer value (5 sec) centered in box – BLACK's time (bottom)
+        timer2_value = value_font.render(f"{self._black_move_time:.1f}s", True, self.timer_text_color)
         timer2_value_rect = timer2_value.get_rect(center=timer2_box_rect.center)
         self.screen.blit(timer2_value, timer2_value_rect)
 
         # Draw move limit displays below the timer boxes
         move_limit_font = pygame.font.Font(None, int(26 * scale_factor))
 
-        # Computer move limit (below top-right timer) - aligned with timer box
-        computer_move_text = move_limit_font.render(f"Moves: {self.computer_moves_remaining}/{self.player2_move_limit}", True, self.timer_text_color)
-        computer_move_rect = computer_move_text.get_rect(topleft=(timer1_box_x, timer1_box_y + timer_box_height + int(8 * scale_factor)))
-        self.screen.blit(computer_move_text, computer_move_rect)
+        # White move limit (below top-right timer) - aligned with timer box
+        white_move_text = move_limit_font.render(f"Moves: {self._white_moves_remaining}/{self.move_limit}", True, self.timer_text_color)
+        white_move_rect = white_move_text.get_rect(topleft=(timer1_box_x, timer1_box_y + timer_box_height + int(8 * scale_factor)))
+        self.screen.blit(white_move_text, white_move_rect)
 
-        # Player move limit (below bottom-right timer) - aligned with timer box
-        player_move_text = move_limit_font.render(f"Moves: {self.player_moves_remaining}/{self.player1_move_limit}", True, self.timer_text_color)
-        player_move_rect = player_move_text.get_rect(topleft=(timer2_box_x, timer2_box_y - move_limit_font.get_height() - int(8 * scale_factor)))
-        self.screen.blit(player_move_text, player_move_rect)
+        # Black move limit (below bottom-right timer) - aligned with timer box
+        black_move_text = move_limit_font.render(f"Moves: {self._black_moves_remaining}/{self.move_limit}", True, self.timer_text_color)
+        black_move_rect = black_move_text.get_rect(topleft=(timer2_box_x, timer2_box_y - move_limit_font.get_height() - int(8 * scale_factor)))
+        self.screen.blit(black_move_text, black_move_rect)
 
     def run(self) -> None:
         """Run the board scene game loop."""

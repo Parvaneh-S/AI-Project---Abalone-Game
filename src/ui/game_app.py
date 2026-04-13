@@ -61,11 +61,8 @@ class GameApp:
 
                 # Show board scene with the selected configuration
                 board_layout = config_page.selected_board if config_page.selected_board else 'standard'
-                if board_layout == 'standard':
-                    invert_colors = config_page.selected_color == 'white'
-                else:
-                    # For Belgian Daisy and German Daisy, always use black configuration
-                    invert_colors = False
+                # Use the selected color for all board layouts
+                invert_colors = config_page.selected_color == 'white'
 
                 board_scene = BoardScene(
                     self.screen,
@@ -74,9 +71,8 @@ class GameApp:
                     board_layout=board_layout,
                     game_mode=config_page.selected_mode,
                     player1_time=config_page.player1_time,
-                    player1_move_limit=config_page.player1_move_limit,
                     player2_time=config_page.player2_time,
-                    player2_move_limit=config_page.player2_move_limit
+                    move_limit=config_page.move_limit
                 )
                 board_scene.run()
 

@@ -20,7 +20,7 @@ class BoardRenderer:
 
         Args:
             center_xy: Center coordinates (x, y) for the board
-            invert_colors: If True, swap black and white marble positions
+            invert_colors: If True, the human player controls white marbles (does not affect board layout)
             board_layout: Board layout type ('standard', 'german', or 'belgian')
         """
         self.center_xy = center_xy
@@ -115,11 +115,11 @@ class BoardRenderer:
         """
         colors: Dict[Tuple[int, int], Tuple[int, int, int]] = {}
 
-        # Determine which color goes on top and which on bottom
-        # When invert_colors is True (player chose WHITE), show BLACK on top and WHITE on bottom
-        # When invert_colors is False (player chose BLACK), show WHITE on top and BLACK on bottom
-        top_color = BLACK_COLOR if self.invert_colors else WHITE_COLOR
-        bottom_color = WHITE_COLOR if self.invert_colors else BLACK_COLOR
+        # In standard Abalone layout, white is always on top and black is always on bottom,
+        # regardless of which color the human player chose.
+        # For German/Belgian daisy layouts the positions are also fixed.
+        top_color = WHITE_COLOR
+        bottom_color = BLACK_COLOR
 
 
         if self.board_layout == 'standard':
