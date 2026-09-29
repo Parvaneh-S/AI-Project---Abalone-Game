@@ -1,6 +1,8 @@
 """
 Game configuration page for the Abalone game - combines game mode and board layout selection.
 """
+from __future__ import annotations
+import asyncio
 import pygame
 from typing import Optional
 from src.ui.constants import (
@@ -710,10 +712,10 @@ class GameModePage:
         pygame.draw.polygon(arrow, (50, 50, 50), [(6, 6), (18, 12), (6, 18)])
         return arrow
 
-    def run(self) -> bool:
-        """Run the game configuration page."""
+    async def run(self) -> bool:
         while True:
             result = self._handle_events()
+
             if result is not None:
                 return result
 
@@ -723,8 +725,9 @@ class GameModePage:
             if self.next_requested:
                 return True
 
-            # Update positions every frame to make the page responsive
             self._update_positions()
             self._draw()
             self.clock.tick(FPS)
+
+            await asyncio.sleep(0)
 

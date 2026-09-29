@@ -1,6 +1,8 @@
 """
 Board scene for the Abalone game.
 """
+from __future__ import annotations
+import asyncio
 import math
 import threading
 import time
@@ -3047,7 +3049,7 @@ class BoardScene:
         black_move_rect = black_move_text.get_rect(topleft=(timer2_box_x, timer2_box_y - move_limit_font.get_height() - int(8 * scale_factor)))
         self.screen.blit(black_move_text, black_move_rect)
 
-    def run(self) -> None:
+    async def run(self) -> None:
         """Run the board scene game loop."""
         while self.running:
             self.running = self._handle_events()
@@ -3055,4 +3057,6 @@ class BoardScene:
             self._maybe_ai_move()
             self._draw()
             self.clock.tick(FPS)
+
+            await asyncio.sleep(0)
 

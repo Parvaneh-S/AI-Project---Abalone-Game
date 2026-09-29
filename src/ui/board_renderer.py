@@ -1,6 +1,7 @@
 """
 Board renderer for the Abalone game.
 """
+from __future__ import annotations
 import math
 from typing import List, Tuple, Dict
 from src.ui.constants import (

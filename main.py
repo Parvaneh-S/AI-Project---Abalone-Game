@@ -4,24 +4,20 @@ Abalone Game - Main Entry Point
 At this point, only the UI for Abalone game has been implemented, and it has no logic yet.
 This is the main entry point that initializes and runs the game application.
 """
-import sys
+import asyncio
 import traceback
+
 from src.ui.game_app import GameApp
 
 
-def main() -> None:
-    """Main entry point for the Abalone game."""
+async def main() -> None:
     try:
         app = GameApp()
-        app.run()
+        await app.run()
+
     except Exception as e:
         traceback.print_exc()
-        print(f"Error running game: {e}", file=sys.stderr)
-        sys.exit(1)
-
-    sys.exit(0)
+        print(f"Error running game: {e}")
 
 
-
-if __name__ == "__main__":
-    main()
+asyncio.run(main())

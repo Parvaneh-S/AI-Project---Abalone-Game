@@ -1,6 +1,7 @@
 """
 Constants for the Abalone game application.
 """
+from __future__ import annotations
 import math
 
 # ----------------------------

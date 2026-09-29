@@ -1,6 +1,8 @@
 """
 Landing page scene for the Abalone game.
 """
+from __future__ import annotations
+import asyncio
 import pygame
 from typing import Optional
 from src.ui.constants import (
@@ -153,18 +155,15 @@ class LandingPage:
 
         pygame.display.flip()
 
-    def run(self) -> bool:
-        """
-        Run the landing page scene.
-
-        Returns:
-            True if user wants to continue to the game, False if quit
-        """
+    async def run(self) -> bool:
         while True:
             result = self._handle_events()
+
             if result is not None:
                 return result
 
             self._draw()
             self.clock.tick(FPS)
+
+            await asyncio.sleep(0)
 
